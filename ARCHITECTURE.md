@@ -53,6 +53,7 @@
 ├── bin/                    # 唯一进 PATH 的目录:setup-coder 本体 + 各 Tool 的 shim
 ├── node/                   # Node LTS 解压目录(node/bin/node)
 ├── npm/                    # npm prefix:Tool 实体装在 npm/lib/node_modules,bin 在 npm/bin
+├── .npmrc                  # 前缀内 npm 配置(registry 指向 npmmirror,经 NPM_CONFIG_USERCONFIG 生效)
 ├── git/                    # 仅 Windows:MinGit 便携版
 ├── cache/                  # 下载缓存(tarball/zip),可整删,重跑自动补
 └── state.json              # 安装清单:已装工具与版本、PATH 注入记录(uninstall/doctor 的依据)

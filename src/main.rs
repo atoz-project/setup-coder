@@ -3,11 +3,16 @@
 //! 面向中国网络环境的小白用户,用一条命令装好各类 AI 编程 CLI 及其前置依赖。
 
 mod commands;
+mod net;
+mod platform;
+mod prefix;
+mod registry;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
 /// 中文帮助模板(裸跑与各子命令 `--help` 共用)
-const HELP_TEMPLATE: &str = "{before-help}{about-with-newline}\n用法: {usage}\n\n{all-args}{after-help}";
+const HELP_TEMPLATE: &str =
+    "{before-help}{about-with-newline}\n用法: {usage}\n\n{all-args}{after-help}";
 
 #[derive(Parser)]
 #[command(
@@ -40,11 +45,20 @@ struct CommonArgs {
     help: Option<bool>,
 }
 
+/// install 子命令参数
+#[derive(clap::Args)]
+struct InstallArgs {
+    /// 只装指定 Tool(codex / claude-code / pi);不带 = 装全部
+    tool: Option<String>,
+    #[command(flatten)]
+    common: CommonArgs,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// 安装 Tool 及其 Prerequisite(Node.js、git),写入私有前缀
     #[command(help_template = HELP_TEMPLATE, next_help_heading = "选项", disable_help_flag = true)]
-    Install(CommonArgs),
+    Install(InstallArgs),
     /// 卸载:删除 Private Prefix,并按 state.json 回滚 PATH 等对外改动
     #[command(help_template = HELP_TEMPLATE, next_help_heading = "选项", disable_help_flag = true)]
     Uninstall(CommonArgs),
@@ -58,12 +72,10 @@ fn main() {
     match cli.command {
         // 裸跑 = 打印中文帮助(退出码 0,对小白友好)
         None => {
-            Cli::command()
-                .print_help()
-                .expect("打印帮助信息失败");
+            Cli::command().print_help().expect("打印帮助信息失败");
             println!();
         }
-        Some(Commands::Install(_)) => commands::install::run(),
+        Some(Commands::Install(args)) => commands::install::run(args.tool),
         Some(Commands::Uninstall(_)) => commands::uninstall::run(),
         Some(Commands::Doctor(_)) => commands::doctor::run(),
     }
@@ -93,6 +105,23 @@ mod tests {
         ] {
             Cli::try_parse_from(args).unwrap_or_else(|e| panic!("子命令 {name} 应能解析: {e}"));
         }
+        Cli::try_parse_from(["setup-coder", "install", "codex"])
+            .expect("install 带 Tool 参数应能解析");
+    }
+
+    #[test]
+    fn install_tool_arg_is_optional() {
+        let cli = Cli::try_parse_from(["setup-coder", "install"]).unwrap();
+        let Some(Commands::Install(args)) = cli.command else {
+            panic!("应解析为 install")
+        };
+        assert!(args.tool.is_none(), "不带参数 = 装全部");
+
+        let cli = Cli::try_parse_from(["setup-coder", "install", "pi"]).unwrap();
+        let Some(Commands::Install(args)) = cli.command else {
+            panic!("应解析为 install")
+        };
+        assert_eq!(args.tool.as_deref(), Some("pi"));
     }
 
     #[test]

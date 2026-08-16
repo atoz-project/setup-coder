@@ -6,6 +6,23 @@ description = "面向中国网络环境的 AI 编程 CLI 安装器"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+# HTTP 下载:纯 Rust TLS(rustls),无 openssl/系统 C 依赖(mac-x64 交叉编译硬约束);
+# Proxy::try_from_env 自动尊重 HTTP_PROXY/HTTPS_PROXY 等代理环境变量
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# state.json 读写(安装清单,uninstall/doctor 的依据)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+# Node tar.gz 解压(flate2 默认 miniz_oxide 后端,纯 Rust)
+flate2 = "1"
+tar = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+# Node zip 解压(deflate 走 flate2 纯 Rust 后端)
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# HKCU 用户 PATH 读写
+winreg = "0.56"
 
 [profile.release]
 strip = true
