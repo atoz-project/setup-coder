@@ -1,6 +1,6 @@
 # setup-coder
 
-面向中国网络环境的小白用户:复制一行命令,零前置依赖地装好 AI 编程 CLI(codex / claude code / pi)及其运行环境。
+面向中国网络环境的小白用户:复制一行命令,零门槛装好 AI 编程 CLI(codex / claude code / pi)及其前置依赖(Node.js、git)。
 
 ## 一行命令安装
 
