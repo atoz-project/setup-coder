@@ -43,7 +43,7 @@ irm https://ghfast.top/https://raw.githubusercontent.com/atoz-project/setup-code
 | --- | --- |
 | `setup-coder install` | 安装 Tool 及前置依赖(不带参数装全部;`install codex` 只装指定 Tool) |
 | `setup-coder uninstall` | 卸载:删除私有前缀,并回滚 PATH 等对外改动 |
-| `setup-coder doctor` | 体检:检查各 Tool 与前置依赖的安装状态 |
+| `setup-coder doctor` | 体检:报告各 Tool 与前置依赖的安装状态 |
 
 ## 常见问题
 
