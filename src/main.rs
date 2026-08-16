@@ -96,6 +96,14 @@ mod tests {
     }
 
     #[test]
+    fn version_flag_prints_version() {
+        match Cli::try_parse_from(["setup-coder", "--version"]) {
+            Err(e) => assert_eq!(e.kind(), clap::error::ErrorKind::DisplayVersion),
+            Ok(_) => panic!("--version 应触发 DisplayVersion 而非解析成功"),
+        }
+    }
+
+    #[test]
     fn unknown_subcommand_is_rejected() {
         assert!(Cli::try_parse_from(["setup-coder", "bogus"]).is_err());
     }
