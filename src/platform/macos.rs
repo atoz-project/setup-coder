@@ -12,14 +12,6 @@ pub fn ensure_path(bin_dir: &Path) -> io::Result<Vec<PathInjection>> {
     super::ensure_path_via_shell_rc(bin_dir, &[".zshrc", ".bash_profile"])
 }
 
-pub fn rollback_injection(injection: &PathInjection) -> io::Result<bool> {
-    match injection {
-        PathInjection::ShellRc { file, line } => super::rollback_shell_rc(file, line),
-        // Windows 注入类型不会出现在本平台的安装清单里
-        PathInjection::WindowsUserPath { .. } => Ok(false),
-    }
-}
-
 /// git 版本:macOS 只用系统 git(在前缀外,doctor 只报告;与 install 同一检测路径)
 pub fn git_version(_prefix: &Prefix) -> Option<String> {
     super::version_output_of(Path::new("git"))

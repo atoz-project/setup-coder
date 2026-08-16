@@ -27,29 +27,36 @@ pub fn ensure_path(bin_dir: &Path) -> io::Result<Vec<PathInjection>> {
         return Ok(Vec::new()); // 已在 PATH,重跑无副作用
     };
 
-    if let Some(v) = raw {
-        if v.vtype == REG_EXPAND_SZ {
-            // REG_EXPAND_SZ 无现成构造函数:手工编码为带 NUL 结尾的 UTF-16LE
-            let bytes: Vec<u8> = merged
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .flat_map(u16::to_le_bytes)
-                .collect();
-            let value = winreg::RegValue {
-                vtype: REG_EXPAND_SZ,
-                bytes: bytes.into(),
-            };
-            env.set_raw_value("Path", &value)?;
-        } else {
-            env.set_value("Path", &merged)?;
-        }
-    } else {
-        env.set_value("Path", &merged)?;
-    }
+    set_user_path(&env, &merged, raw.as_ref())?;
     // 注:不广播 WM_SETTINGCHANGE(需额外 crate);新开的终端自然生效。
     Ok(vec![PathInjection::WindowsUserPath {
         dir: bin_dir.to_path_buf(),
     }])
+}
+
+/// 写 HKCU 用户 Path:保留原有 REG_EXPAND_SZ 类型(ensure_path / rollback_injection 共用)。
+/// REG_EXPAND_SZ 无现成构造函数:手工编码为带 NUL 结尾的 UTF-16LE。
+fn set_user_path(
+    env: &winreg::RegKey,
+    merged: &str,
+    raw: Option<&winreg::RegValue>,
+) -> io::Result<()> {
+    use winreg::enums::*;
+    if raw.is_some_and(|v| v.vtype == REG_EXPAND_SZ) {
+        let bytes: Vec<u8> = merged
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let value = winreg::RegValue {
+            vtype: REG_EXPAND_SZ,
+            bytes: bytes.into(),
+        };
+        env.set_raw_value("Path", &value)?;
+    } else {
+        env.set_value("Path", &merged)?;
+    }
+    Ok(())
 }
 
 /// 按安装清单记录精确回滚一条 PATH 注入(保留原有 REG_EXPAND_SZ 类型)。
@@ -71,21 +78,7 @@ pub fn rollback_injection(injection: &PathInjection) -> io::Result<bool> {
     let Some(merged) = super::windows_path_remove(&existing, &dir) else {
         return Ok(false); // 已回滚过,幂等无副作用
     };
-    if raw.vtype == REG_EXPAND_SZ {
-        // 与 ensure_path 同一编码:带 NUL 结尾的 UTF-16LE
-        let bytes: Vec<u8> = merged
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .flat_map(u16::to_le_bytes)
-            .collect();
-        let value = winreg::RegValue {
-            vtype: REG_EXPAND_SZ,
-            bytes: bytes.into(),
-        };
-        env.set_raw_value("Path", &value)?;
-    } else {
-        env.set_value("Path", &merged)?;
-    }
+    set_user_path(&env, &merged, Some(&raw))?;
     Ok(true)
 }
 

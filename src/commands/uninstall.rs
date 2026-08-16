@@ -27,7 +27,13 @@ fn uninstall(yes: bool) -> Result<(), Box<dyn Error>> {
         );
         return Ok(());
     }
-    let state = State::load(&prefix)?;
+    // 清单损坏 = 无法精确回滚:中止并给出手工下一步,不贸然删前缀
+    let state = State::load(&prefix).map_err(|e| {
+        format!(
+            "{e}\n下一步:可手工删除 {},并自行清理 shell 配置中 # setup-coder 标记的 PATH 行",
+            prefix.root().display()
+        )
+    })?;
 
     if !yes && !confirm(&prefix, &state)? {
         println!("已取消卸载。");
@@ -35,15 +41,19 @@ fn uninstall(yes: bool) -> Result<(), Box<dyn Error>> {
     }
 
     // 1. 按 state.json 逐条精确回滚 PATH 注入(先回滚,清单随后随前缀一起删)
+    let mut rollback_failed = 0;
     for injection in &state.path_injections {
         match platform::rollback_injection(injection) {
             Ok(true) => println!("已回滚 PATH 改动:{}", describe_injection(injection)),
             Ok(false) => println!("PATH 改动已不存在,跳过:{}", describe_injection(injection)),
-            // 单条回滚失败不中断:继续其余回滚与前缀删除,最后统一提示
-            Err(e) => eprintln!(
-                "警告:回滚 PATH 改动失败({}):{e},请稍后手工核对",
-                describe_injection(injection)
-            ),
+            // 单条回滚失败不中断:继续其余回滚与前缀删除,结尾统一提示
+            Err(e) => {
+                rollback_failed += 1;
+                eprintln!(
+                    "警告:回滚 PATH 改动失败({}):{e},请稍后手工核对",
+                    describe_injection(injection)
+                );
+            }
         }
     }
 
@@ -60,7 +70,11 @@ fn uninstall(yes: bool) -> Result<(), Box<dyn Error>> {
     }
 
     println!();
-    println!("卸载完成。PATH 改动将在新开终端后生效。");
+    if rollback_failed > 0 {
+        println!("卸载完成,但有 {rollback_failed} 条 PATH 改动回滚失败,请按上面的警告手工核对。");
+    } else {
+        println!("卸载完成。PATH 改动将在新开终端后生效。");
+    }
     Ok(())
 }
 

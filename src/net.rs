@@ -61,10 +61,10 @@ pub fn mingit_urls() -> Vec<String> {
     ]
 }
 
-/// 建 HTTP agent:尊重代理环境变量,大文件下载给足超时(国内慢网)
-fn agent() -> ureq::Agent {
+/// 建 HTTP agent:尊重代理环境变量;超时由调用方定(大文件下载给足,体检探测要短)
+fn agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(30 * 60)))
+        .timeout_global(Some(timeout))
         .proxy(ureq::Proxy::try_from_env())
         .user_agent(concat!("setup-coder/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -83,12 +83,7 @@ pub fn connectivity_endpoints() -> Vec<(&'static str, &'static str)> {
 /// 轻量连通性探测:HEAD 请求 + 短超时;有 HTTP 响应(无论状态码)即算连通,
 /// 只有网络层错误才算不通。返回 HTTP 状态码或错误描述。
 pub fn head_status(url: &str) -> Result<u16, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
-        .proxy(ureq::Proxy::try_from_env())
-        .user_agent(concat!("setup-coder/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into();
+    let agent = agent(Duration::from_secs(10));
     match agent.head(url).call() {
         Ok(resp) => Ok(resp.status().as_u16()),
         Err(ureq::Error::StatusCode(code)) => Ok(code),
@@ -111,7 +106,8 @@ fn download_once(agent: &ureq::Agent, url: &str, dest: &Path) -> Result<(), Box<
 /// Mirror 容错链:依次尝试 `urls`,首个成功者写入 `dest` 并返回命中的 URL;
 /// 全部失败则汇总各源错误后报错。
 pub fn download_first(urls: &[String], dest: &Path) -> Result<String, Box<dyn Error>> {
-    let agent = agent();
+    // 大文件下载给足超时(国内慢网)
+    let agent = agent(Duration::from_secs(30 * 60));
     let mut failures = Vec::new();
     for url in urls {
         match download_once(&agent, url, dest) {

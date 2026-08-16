@@ -513,6 +513,18 @@ pub fn extract_node_archive(archive: &Path, dest_dir: &Path) -> io::Result<()> {
 
 /// 按 state.json 记录精确回滚一条 PATH 注入(不做模糊匹配)。
 /// Ok(true) = 实际回滚了;Ok(false) = 对应内容已不存在(幂等,无需处理)。
+/// unix 两平台实现相同,直接收在此处;Windows 走注册表,分派 imp。
+#[cfg(unix)]
+pub fn rollback_injection(injection: &PathInjection) -> io::Result<bool> {
+    match injection {
+        PathInjection::ShellRc { file, line } => rollback_shell_rc(file, line),
+        // Windows 注入类型不会出现在本平台的安装清单里
+        PathInjection::WindowsUserPath { .. } => Ok(false),
+    }
+}
+
+/// Windows:按 state.json 记录精确回滚一条 PATH 注入(HKCU 用户 PATH)
+#[cfg(windows)]
 pub fn rollback_injection(injection: &PathInjection) -> io::Result<bool> {
     imp::rollback_injection(injection)
 }
