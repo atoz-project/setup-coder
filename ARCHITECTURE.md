@@ -24,7 +24,8 @@
 │       └── linux.rs
 ├── scripts/
 │   ├── install.sh          # one-liner(mac/Ubuntu)
-│   └── install.ps1         # one-liner(Windows)
+│   ├── install.ps1         # one-liner(Windows)
+│   └── tests/              # 脚本可测逻辑(平台探测、字段提取、源链拼接)的最小测试
 ├── .github/
 │   ├── workflows/
 │   │   ├── ci.yml          # push/PR:build matrix 四平台
@@ -41,7 +42,7 @@
 规则:
 
 - 平台差异只允许出现在 `platform/`;commands 层写"做什么",platform 层写"在这个系统上怎么做"。
-- 路径不许散落硬编码,一律取自 `prefix.rs`。
+- 路径不许散落硬编码,一律取自 `prefix.rs`(例外:`scripts/` 的 one-liner 脚本是自举入口,跑起来时 prefix.rs 尚未下载,豁免本条;路径常量以两脚本自身为准,须与下文前缀布局一致)。
 - 脚本(`scripts/`)只做"下载二进制并转交",不长逻辑。
 
 ## 安装前缀布局(用户机器)
