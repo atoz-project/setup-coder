@@ -25,9 +25,12 @@
 ├── scripts/
 │   ├── install.sh          # one-liner(mac/Ubuntu)
 │   └── install.ps1         # one-liner(Windows)
-├── .github/workflows/
-│   ├── ci.yml              # push/PR:build matrix 四平台
-│   └── release.yml         # tag v*:Release + latest.json
+├── .github/
+│   ├── workflows/
+│   │   ├── ci.yml          # push/PR:build matrix 四平台
+│   │   └── release.yml     # tag v*:Release + latest.json
+│   └── scripts/            # CI 专用脚本(与面向用户的 scripts/ 区分)
+│       └── make-latest-json.sh  # 生成 latest.json(产物索引,结构即镜像契约)
 ├── docs/
 │   ├── adr/                # 决策记录
 │   └── agents/             # agent 工作约定

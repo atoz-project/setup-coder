@@ -1,0 +1,102 @@
+name: Release
+
+# 打 tag v* 触发:四平台构建 → 创建 GitHub Release → 上传产物与 latest.json。
+# 产物布局 = 镜像分发契约:所有文件平铺在 Release 根目录,整目录拷贝到 OSS/Gitee 即可用。
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 构建配置与 ci.yml 保持一致(纯 Rust 无 C 依赖,mac-x64 可在 Apple Silicon runner 交叉编译)
+          - { name: win-x64, os: windows-latest, target: x86_64-pc-windows-msvc, bin: setup-coder.exe, ext: .exe }
+          - { name: mac-arm64, os: macos-latest, target: aarch64-apple-darwin, bin: setup-coder, ext: '' }
+          - { name: mac-x64, os: macos-latest, target: x86_64-apple-darwin, bin: setup-coder, ext: '' }
+          - { name: linux-x64, os: ubuntu-latest, target: x86_64-unknown-linux-musl, bin: setup-coder, ext: '' }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 安装 musl 链接工具
+        if: matrix.name == 'linux-x64'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: 编译(Windows 静态 CRT)
+        if: matrix.name == 'win-x64'
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: 编译
+        if: matrix.name != 'win-x64'
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: 收集产物(Release 命名 setup-coder-<target>[.exe])
+        shell: bash
+        run: |
+          mkdir dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" \
+             "dist/setup-coder-${{ matrix.name }}${{ matrix.ext }}"
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup-coder-${{ matrix.name }}
+          path: dist/setup-coder-${{ matrix.name }}${{ matrix.ext }}
+          if-no-files-found: error
+
+  release:
+    name: 创建 Release 并上传产物
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 汇总四平台产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: setup-coder-*
+          path: dist
+          merge-multiple: true
+
+      - name: 生成 latest.json
+        run: .github/scripts/make-latest-json.sh "$GITHUB_REF_NAME" dist latest.json
+
+      - name: 创建 Release 并上传二进制与 latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "setup-coder $GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/* latest.json
+
+      # one-liner 安装脚本属工单 #5,scripts/ 目录可能尚不存在 —— 存在才上传,不存在不报错。
+      # latest.json 的 install 字段同样按存在与否填 null,结构已预留。
+      - name: 上传 one-liner 安装脚本(存在才上传)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for f in scripts/install.sh scripts/install.ps1; do
+            if [ -f "$f" ]; then
+              gh release upload "$GITHUB_REF_NAME" "$f" --repo "$GITHUB_REPOSITORY" --clobber
+            else
+              echo "::notice::$f 不存在(#5 尚未交付),跳过上传"
+            fi
+          done
