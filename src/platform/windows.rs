@@ -52,6 +52,53 @@ pub fn ensure_path(bin_dir: &Path) -> io::Result<Vec<PathInjection>> {
     }])
 }
 
+/// 按安装清单记录精确回滚一条 PATH 注入(保留原有 REG_EXPAND_SZ 类型)。
+pub fn rollback_injection(injection: &PathInjection) -> io::Result<bool> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let PathInjection::WindowsUserPath { dir } = injection else {
+        // unix 注入类型不会出现在本平台的安装清单里
+        return Ok(false);
+    };
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (env, _) = hkcu.create_subkey("Environment")?;
+    let Some(raw) = env.get_raw_value("Path").ok() else {
+        return Ok(false);
+    };
+    let existing = raw.to_string();
+    let dir = dir.to_string_lossy();
+    let Some(merged) = super::windows_path_remove(&existing, &dir) else {
+        return Ok(false); // 已回滚过,幂等无副作用
+    };
+    if raw.vtype == REG_EXPAND_SZ {
+        // 与 ensure_path 同一编码:带 NUL 结尾的 UTF-16LE
+        let bytes: Vec<u8> = merged
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let value = winreg::RegValue {
+            vtype: REG_EXPAND_SZ,
+            bytes: bytes.into(),
+        };
+        env.set_raw_value("Path", &value)?;
+    } else {
+        env.set_value("Path", &merged)?;
+    }
+    Ok(true)
+}
+
+/// git 版本:先看系统 PATH(用户自装,doctor 只报告),再退回前缀内 MinGit
+pub fn git_version(prefix: &Prefix) -> Option<String> {
+    super::version_output_of(Path::new("git"))
+        .or_else(|| super::version_output_of(&prefix.git_exe()))
+}
+
+pub fn git_missing_hint() -> &'static str {
+    "重跑 setup-coder install 自动安装便携版 git(MinGit)"
+}
+
 pub fn write_shim(
     bin_dir: &Path,
     node_bin_dir: &Path,

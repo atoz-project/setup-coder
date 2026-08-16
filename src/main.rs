@@ -54,6 +54,16 @@ struct InstallArgs {
     common: CommonArgs,
 }
 
+/// uninstall 子命令参数
+#[derive(clap::Args)]
+struct UninstallArgs {
+    /// 跳过确认提示,直接卸载
+    #[arg(long)]
+    yes: bool,
+    #[command(flatten)]
+    common: CommonArgs,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// 安装 Tool 及其 Prerequisite(Node.js、git),写入私有前缀
@@ -61,8 +71,8 @@ enum Commands {
     Install(InstallArgs),
     /// 卸载:删除 Private Prefix,并按 state.json 回滚 PATH 等对外改动
     #[command(help_template = HELP_TEMPLATE, next_help_heading = "选项", disable_help_flag = true)]
-    Uninstall(CommonArgs),
-    /// 体检:检查 Private Prefix 内各 Tool 与 Prerequisite 的安装状态
+    Uninstall(UninstallArgs),
+    /// 体检:报告 Private Prefix 内各 Tool 与 Prerequisite 的安装状态、PATH 与连通性
     #[command(help_template = HELP_TEMPLATE, next_help_heading = "选项", disable_help_flag = true)]
     Doctor(CommonArgs),
 }
@@ -76,7 +86,7 @@ fn main() {
             println!();
         }
         Some(Commands::Install(args)) => commands::install::run(args.tool),
-        Some(Commands::Uninstall(_)) => commands::uninstall::run(),
+        Some(Commands::Uninstall(args)) => commands::uninstall::run(args.yes),
         Some(Commands::Doctor(_)) => commands::doctor::run(),
     }
 }
@@ -107,6 +117,21 @@ mod tests {
         }
         Cli::try_parse_from(["setup-coder", "install", "codex"])
             .expect("install 带 Tool 参数应能解析");
+    }
+
+    #[test]
+    fn uninstall_yes_flag_parses() {
+        let cli = Cli::try_parse_from(["setup-coder", "uninstall"]).unwrap();
+        let Some(Commands::Uninstall(args)) = cli.command else {
+            panic!("应解析为 uninstall")
+        };
+        assert!(!args.yes, "不带 --yes = 需要确认");
+
+        let cli = Cli::try_parse_from(["setup-coder", "uninstall", "--yes"]).unwrap();
+        let Some(Commands::Uninstall(args)) = cli.command else {
+            panic!("应解析为 uninstall")
+        };
+        assert!(args.yes);
     }
 
     #[test]

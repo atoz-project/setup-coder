@@ -71,6 +71,31 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
+/// doctor 连通性体检端点:与下载容错链同源的 Mirror 根(只发轻量 HEAD,不下载大包)
+pub fn connectivity_endpoints() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("npmmirror registry", "https://registry.npmmirror.com"),
+        ("npmmirror CDN", "https://cdn.npmmirror.com"),
+        ("华为云镜像", "https://mirrors.huaweicloud.com"),
+    ]
+}
+
+/// 轻量连通性探测:HEAD 请求 + 短超时;有 HTTP 响应(无论状态码)即算连通,
+/// 只有网络层错误才算不通。返回 HTTP 状态码或错误描述。
+pub fn head_status(url: &str) -> Result<u16, String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .proxy(ureq::Proxy::try_from_env())
+        .user_agent(concat!("setup-coder/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into();
+    match agent.head(url).call() {
+        Ok(resp) => Ok(resp.status().as_u16()),
+        Err(ureq::Error::StatusCode(code)) => Ok(code),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn download_once(agent: &ureq::Agent, url: &str, dest: &Path) -> Result<(), Box<dyn Error>> {
     let resp = agent.get(url).call()?;
     if resp.status() != ureq::http::StatusCode::OK {
@@ -119,6 +144,24 @@ mod tests {
         assert!(err.contains("/b"), "应列出第二个源:{err}");
         assert!(!dest.exists(), "失败不得留下半截文件");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn connectivity_endpoints_are_mirror_roots_over_https() {
+        let endpoints = connectivity_endpoints();
+        assert!(endpoints.len() >= 2, "至少覆盖 npmmirror 与一个下载源");
+        for (name, url) in &endpoints {
+            assert!(url.starts_with("https://"), "只允许 https:{url}");
+            assert!(!name.is_empty());
+        }
+        // 与下载容错链同源:主源必须是 npmmirror
+        assert!(endpoints[0].1.contains("npmmirror.com"));
+    }
+
+    #[test]
+    fn head_status_reports_network_error_without_panic() {
+        // 不可达端口,立即失败;应返回 Err 而非 panic
+        assert!(head_status("http://127.0.0.1:1/").is_err());
     }
 
     #[test]

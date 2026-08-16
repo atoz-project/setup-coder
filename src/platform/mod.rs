@@ -4,7 +4,6 @@
 //! 纯逻辑(字符串拼接/幂等判断)直接放在本文件,全平台可编译、可单测;
 //! 涉及文件系统/注册表的薄接缝在 `windows.rs` / `macos.rs` / `linux.rs`。
 
-#[cfg(unix)]
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -104,6 +103,33 @@ pub fn shell_rc_export_line(bin_dir: &Path) -> String {
     format!("export PATH=\"{}:$PATH\"  # setup-coder", bin_dir.display())
 }
 
+/// shell rc 精确回滚:删除与安装清单记录逐字匹配的行(trim 比较,防御手抖编辑),
+/// 返回删除后的完整新内容;没有匹配行 = 已回滚过,返回 None。不做模糊匹配(工单 #4)。
+#[cfg(any(unix, test))]
+pub fn shell_rc_remove(existing: &str, line: &str) -> Option<String> {
+    let target = line.trim();
+    let mut removed = false;
+    let kept: Vec<&str> = existing
+        .lines()
+        .filter(|l| {
+            if l.trim() == target {
+                removed = true;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    if !removed {
+        return None;
+    }
+    let mut new = kept.join("\n");
+    if !new.is_empty() {
+        new.push('\n');
+    }
+    Some(new)
+}
+
 /// shell rc 幂等追加:内容中已有该行则返回 None,否则返回追加后的完整新内容。
 #[cfg(any(unix, test))]
 pub fn shell_rc_append(existing: &str, export_line: &str) -> Option<String> {
@@ -143,6 +169,30 @@ pub fn windows_path_merge(existing: &str, dir: &str) -> Option<String> {
     }
     new.push_str(dir.trim());
     Some(new)
+}
+
+/// Windows 用户 PATH 精确回滚:移除与安装清单记录匹配的目录(忽略大小写、
+/// 忽略首尾 `\`/`/` 与空白,与 merge 同一归一化),返回移除后的完整 PATH;
+/// 没有匹配项 = 已回滚过,返回 None。不做模糊匹配(工单 #4)。
+#[cfg(any(windows, test))]
+pub fn windows_path_remove(existing: &str, dir: &str) -> Option<String> {
+    fn normalize(s: &str) -> String {
+        s.trim().trim_end_matches(['\\', '/']).to_ascii_lowercase()
+    }
+    let target = normalize(dir);
+    let entries: Vec<&str> = existing.split(';').collect();
+    let kept: Vec<&str> = entries
+        .iter()
+        .copied()
+        .filter(|entry| {
+            let n = normalize(entry);
+            n.is_empty() || n != target
+        })
+        .collect();
+    if kept.len() == entries.len() {
+        return None;
+    }
+    Some(kept.join(";"))
 }
 
 /// unix shim 内容:把前缀内 node 加进 PATH,再转交 npm 全局 bin。
@@ -202,6 +252,101 @@ pub fn path_activation_hint() -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// uninstall / doctor(工单 #4)——纯逻辑与共享助手
+// ---------------------------------------------------------------------------
+
+/// 运行 `<exe> --version`,成功且输出非空则返回去空白后的版本串;否则 None。
+pub fn version_output_of(exe: &Path) -> Option<String> {
+    let out = Command::new(exe).arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if version.is_empty() {
+        None
+    } else {
+        Some(version)
+    }
+}
+
+/// 进程 PATH 环境变量是否包含指定目录(逐条比较;components 归一化尾部斜杠)。
+/// 注:Windows 上按逐字比较 —— install 写入的正是这个路径,新开终端后原样出现。
+pub fn path_contains_dir(path_var: &std::ffi::OsStr, dir: &Path) -> bool {
+    fn normalize(p: &Path) -> PathBuf {
+        p.components().collect()
+    }
+    let target = normalize(dir);
+    std::env::split_paths(path_var).any(|p| normalize(&p) == target)
+}
+
+/// doctor 体检时 PATH 未生效的指引文案(平台文案分叉收敛于此)
+pub fn path_not_effective_hint(bin_dir: &Path) -> String {
+    if cfg!(windows) {
+        format!(
+            "新开一个终端窗口后重跑 doctor;若仍未生效,请确认用户环境变量 Path 中含有 {}",
+            bin_dir.display()
+        )
+    } else {
+        "新开终端(或 source 对应 rc 文件)后重跑 doctor;若仍未生效,请确认 rc 文件中 \
+         有 # setup-coder 标记的 PATH 行"
+            .to_string()
+    }
+}
+
+/// 删除 `root` 下除 `keep` 文件及其祖先目录外的全部内容(Windows 自身 exe 残留策略用)。
+/// file_type 不跟随符号链接:npm 全局 bin 里的 symlink 只删链接本身,不误删目标。
+pub fn remove_all_except(root: &Path, keep: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path == keep {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            if keep.starts_with(&path) {
+                remove_all_except(&path, keep)?;
+                // keep 在其中,目录非空删不掉属预期,忽略错误
+                let _ = fs::remove_dir(&path);
+            } else {
+                fs::remove_dir_all(&path)?;
+            }
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
+/// 删除 Private Prefix 目录树。
+///
+/// 决策(工单 #4,Windows 边角):正在运行的 exe 删不掉自己 —— 策略为「其余全删,
+/// 自身留下」:先整体删;失败且当前 exe 在前缀内(仅 Windows 会发生)时,改为删除
+/// 除自身 exe 外的全部内容,返回 Some(自身 exe 路径),由 commands 层中文提示手删。
+/// unix 可删正在运行的文件,恒走整体删。真机验证归工单 #7;残留逻辑由
+/// remove_all_except 的单测覆盖。
+pub fn remove_prefix(root: &Path) -> io::Result<Option<PathBuf>> {
+    match fs::remove_dir_all(root) {
+        Ok(()) => Ok(None),
+        Err(e) => {
+            let locked_self = if cfg!(windows) {
+                std::env::current_exe()
+                    .ok()
+                    .filter(|exe| exe.starts_with(root))
+            } else {
+                None
+            };
+            match locked_self {
+                Some(exe) => {
+                    remove_all_except(root, &exe)?;
+                    Ok(Some(exe))
+                }
+                None => Err(e),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Prerequisite:git(工单 #3)——纯逻辑与共享助手
 // ---------------------------------------------------------------------------
 
@@ -250,11 +395,7 @@ pub(super) fn git_works_at(exe: &Path) -> bool {
 /// 轮询等待:每 `interval` 调一次 `check`,通过返回 true,`timeout` 内未通过返回 false。
 /// 可单测的等待接缝(macOS 等 CLT 安装用)。
 #[cfg(any(target_os = "macos", test))]
-pub fn wait_until(
-    mut check: impl FnMut() -> bool,
-    timeout: Duration,
-    interval: Duration,
-) -> bool {
+pub fn wait_until(mut check: impl FnMut() -> bool, timeout: Duration, interval: Duration) -> bool {
     let start = std::time::Instant::now();
     loop {
         if check() {
@@ -370,6 +511,23 @@ pub fn extract_node_archive(archive: &Path, dest_dir: &Path) -> io::Result<()> {
     imp::extract_node_archive(archive, dest_dir)
 }
 
+/// 按 state.json 记录精确回滚一条 PATH 注入(不做模糊匹配)。
+/// Ok(true) = 实际回滚了;Ok(false) = 对应内容已不存在(幂等,无需处理)。
+pub fn rollback_injection(injection: &PathInjection) -> io::Result<bool> {
+    imp::rollback_injection(injection)
+}
+
+/// git 版本串:unix 只看系统 PATH(系统 git 在前缀外,doctor 只报告);
+/// Windows 先看系统 PATH 再看前缀内 MinGit。
+pub fn git_version(prefix: &Prefix) -> Option<String> {
+    imp::git_version(prefix)
+}
+
+/// doctor 体检时 git 不可用的指引文案(平台文案分叉收敛于此)
+pub fn git_missing_hint() -> &'static str {
+    imp::git_missing_hint()
+}
+
 // ---------------------------------------------------------------------------
 // unix 共享薄接缝(macos.rs / linux.rs 复用;平台差异只在 rc 文件清单)
 // ---------------------------------------------------------------------------
@@ -417,6 +575,21 @@ pub(super) fn write_shim_impl(
     fs::write(&path, shim_content(node_bin_dir, npm_bin_dir, bin))?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
     Ok(path)
+}
+
+/// 按安装清单记录精确回滚一条 shell rc PATH 注入。文件不存在或无匹配行 = Ok(false)。
+#[cfg(unix)]
+pub(super) fn rollback_shell_rc(file: &Path, line: &str) -> io::Result<bool> {
+    let existing = match fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let Some(new) = shell_rc_remove(&existing, line) else {
+        return Ok(false);
+    };
+    fs::write(file, new)?;
+    Ok(true)
 }
 
 #[cfg(unix)]
@@ -485,6 +658,114 @@ mod tests {
         assert_eq!(node_archive_ext_for("windows"), "zip");
         assert_eq!(node_archive_ext_for("macos"), "tar.gz");
         assert_eq!(node_archive_ext_for("linux"), "tar.gz");
+    }
+
+    #[test]
+    fn shell_rc_remove_deletes_only_the_recorded_line() {
+        let line = shell_rc_export_line(Path::new("/home/u/.setup-coder/bin"));
+        // 精确删除记录行,其他行原样保留
+        let rc = format!("export FOO=1\n{line}\nexport BAR=2\n");
+        let new = shell_rc_remove(&rc, &line).unwrap();
+        assert_eq!(new, "export FOO=1\nexport BAR=2\n");
+        // 已是回滚后状态 → None(幂等)
+        assert!(shell_rc_remove(&new, &line).is_none());
+        // 无该行 → None(不做模糊匹配)
+        assert!(shell_rc_remove("export FOO=1\n", &line).is_none());
+        // 行首尾有空白也算同一行(与 append 的幂等判断同规则)
+        let padded = format!("  {line}  \n");
+        assert_eq!(shell_rc_remove(&padded, &line).unwrap(), "");
+        // 无结尾换行的文件 → 移除后不引入多余空行
+        let no_nl = format!("export FOO=1\n{line}");
+        assert_eq!(shell_rc_remove(&no_nl, &line).unwrap(), "export FOO=1\n");
+    }
+
+    #[test]
+    fn windows_path_remove_deletes_only_the_recorded_dir() {
+        let dir = r"C:\Users\u\.setup-coder\bin";
+        let path = format!(r"C:\Windows;{dir};C:\Tools");
+        let new = windows_path_remove(&path, dir).unwrap();
+        assert_eq!(new, r"C:\Windows;C:\Tools");
+        // 已是回滚后状态 → None(幂等)
+        assert!(windows_path_remove(&new, dir).is_none());
+        // 大小写/尾斜杠差异也命中(与 merge 同一归一化)
+        assert!(windows_path_remove(r"c:\users\u\.setup-coder\bin", dir).is_some());
+        assert!(windows_path_remove(&path, r"C:\Users\u\.setup-coder\bin\").is_some());
+        // 相似但不等的目录不动(不做模糊匹配)
+        assert!(windows_path_remove(r"C:\Users\u\.setup-coder\bin2", dir).is_none());
+        // 唯一条目被移除 → 空串
+        assert_eq!(windows_path_remove(dir, dir).unwrap(), "");
+    }
+
+    #[test]
+    fn path_contains_dir_matches_exact_entry() {
+        let dir = Path::new("/home/u/.setup-coder/bin");
+        let path_var = std::ffi::OsString::from(format!("/usr/bin:{}", dir.display()));
+        assert!(path_contains_dir(&path_var, dir));
+        // 尾部斜杠归一化后仍命中
+        let with_slash = std::ffi::OsString::from(format!("{}/", dir.display()));
+        assert!(path_contains_dir(&with_slash, dir));
+        // 前缀相似但不是同一目录 → 不命中
+        let other = std::ffi::OsString::from("/home/u/.setup-coder/bin2");
+        assert!(!path_contains_dir(&other, dir));
+        assert!(!path_contains_dir(&std::ffi::OsString::from(""), dir));
+    }
+
+    #[test]
+    fn version_output_of_captures_version_or_none() {
+        // 不存在的可执行文件 → None(不 panic)
+        assert!(version_output_of(Path::new("/nonexistent/setup-coder-test")).is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir =
+                std::env::temp_dir().join(format!("setup-coder-test-ver-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let fake = dir.join("tool");
+            fs::write(&fake, "#!/bin/sh\necho '  tool 1.2.3  '\n").unwrap();
+            fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(version_output_of(&fake).unwrap(), "tool 1.2.3");
+            // 退出非零 → None
+            let bad = dir.join("bad");
+            fs::write(&bad, "#!/bin/sh\nexit 1\n").unwrap();
+            fs::set_permissions(&bad, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(version_output_of(&bad).is_none());
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn remove_all_except_keeps_only_the_locked_file() {
+        let root = std::env::temp_dir().join(format!("setup-coder-test-rm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        // 造前缀:bin/setup-coder(假装是正在运行的自身)+ node/ + state.json
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::create_dir_all(root.join("node")).unwrap();
+        let locked = root.join("bin").join(exe_name("setup-coder"));
+        fs::write(&locked, "exe").unwrap();
+        fs::write(root.join("bin").join("codex"), "shim").unwrap();
+        fs::write(root.join("node").join("node"), "node").unwrap();
+        fs::write(root.join("state.json"), "{}").unwrap();
+
+        remove_all_except(&root, &locked).unwrap();
+        assert!(locked.exists(), "keep 文件必须留下");
+        assert!(!root.join("state.json").exists());
+        assert!(!root.join("node").exists());
+        assert!(!root.join("bin").join("codex").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_prefix_deletes_everything_on_unix() {
+        let root =
+            std::env::temp_dir().join(format!("setup-coder-test-rmall-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(root.join("state.json"), "{}").unwrap();
+        // unix 可删正在运行的文件,无残留
+        assert_eq!(remove_prefix(&root).unwrap(), None);
+        assert!(!root.exists());
     }
 
     #[test]
@@ -622,7 +903,8 @@ mod tests {
     fn find_in_path_only_matches_executable_files() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!("setup-coder-test-path-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("setup-coder-test-path-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path_var = std::ffi::OsString::from(&dir);
@@ -642,7 +924,10 @@ mod tests {
     #[test]
     fn linux_error_messages_give_manual_command_in_chinese() {
         let no_sudo = no_sudo_error();
-        assert!(no_sudo.contains("apt-get install -y git"), "应给手工命令:{no_sudo}");
+        assert!(
+            no_sudo.contains("apt-get install -y git"),
+            "应给手工命令:{no_sudo}"
+        );
         assert!(no_sudo.contains("没有 sudo"));
         let apt_failed = apt_install_failed_error();
         assert!(apt_failed.contains("sudo apt-get update"));
