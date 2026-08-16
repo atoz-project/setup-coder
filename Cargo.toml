@@ -1,0 +1,13 @@
+[package]
+name = "setup-coder"
+version = "0.1.0"
+edition = "2021"
+description = "面向中国网络环境的 AI 编程 CLI 安装器"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+strip = true
+lto = true
