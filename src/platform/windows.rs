@@ -83,15 +83,15 @@ pub fn ensure_git(prefix: &Prefix) -> Result<super::GitOutcome, Box<dyn Error>> 
     }
     let git_exe = prefix.git_exe();
     if !super::git_works_at(&git_exe) {
-        println!("下载 MinGit {} 便携版…", super::MINGIT_VERSION);
-        let archive = prefix.cache_dir().join(super::mingit_archive_name());
-        let hit = net::download_first(&super::mingit_urls(), &archive)?;
+        println!("下载 MinGit {} 便携版…", net::MINGIT_VERSION);
+        let archive = prefix.cache_dir().join(net::mingit_archive_name());
+        let hit = net::download_first(&net::mingit_urls(), &archive)?;
         println!("已从 Mirror 下载:{hit}");
 
         // 解压到暂存目录,成功后整体替换 git/(避免半残前缀;MinGit zip 根目录即 cmd/,不剥层)
         let staging = prefix.cache_dir().join("git-staging");
         let _ = fs::remove_dir_all(&staging);
-        extract_mingit_zip(&archive, &staging)?;
+        extract_zip(&archive, &staging, false)?;
         let git_dir = prefix.git_dir();
         let _ = fs::remove_dir_all(&git_dir);
         fs::rename(&staging, &git_dir)?;
@@ -110,8 +110,8 @@ pub fn ensure_git(prefix: &Prefix) -> Result<super::GitOutcome, Box<dyn Error>> 
     Ok(super::GitOutcome::Installed)
 }
 
-/// MinGit zip 解压:不剥顶层(zip 根目录即 cmd/、mingw64/ 等)。
-fn extract_mingit_zip(archive: &Path, dest_dir: &Path) -> io::Result<()> {
+/// zip 解压:`strip_top` 为 true 时剥掉顶层目录一层(Node 发行包),false 原样解(MinGit)。
+fn extract_zip(archive: &Path, dest_dir: &Path, strip_top: bool) -> io::Result<()> {
     let file = fs::File::open(archive)?;
     let mut zip = zip::ZipArchive::new(file)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("zip 损坏:{e}")))?;
@@ -123,7 +123,15 @@ fn extract_mingit_zip(archive: &Path, dest_dir: &Path) -> io::Result<()> {
         let Some(path) = entry.enclosed_name() else {
             continue;
         };
-        let out = dest_dir.join(path);
+        let rel: PathBuf = if strip_top {
+            path.components().skip(1).collect()
+        } else {
+            path
+        };
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let out = dest_dir.join(rel);
         if entry.is_dir() {
             fs::create_dir_all(&out)?;
         } else {
@@ -139,31 +147,5 @@ fn extract_mingit_zip(archive: &Path, dest_dir: &Path) -> io::Result<()> {
 
 /// Windows:zip 解压,剥掉顶层目录一层。
 pub fn extract_node_archive(archive: &Path, dest_dir: &Path) -> io::Result<()> {
-    let file = fs::File::open(archive)?;
-    let mut zip = zip::ZipArchive::new(file)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("zip 损坏:{e}")))?;
-    fs::create_dir_all(dest_dir)?;
-    for i in 0..zip.len() {
-        let mut entry = zip
-            .by_index(i)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let Some(path) = entry.enclosed_name() else {
-            continue;
-        };
-        let stripped: PathBuf = path.components().skip(1).collect();
-        if stripped.as_os_str().is_empty() {
-            continue;
-        }
-        let out = dest_dir.join(stripped);
-        if entry.is_dir() {
-            fs::create_dir_all(&out)?;
-        } else {
-            if let Some(parent) = out.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut w = fs::File::create(&out)?;
-            io::copy(&mut entry, &mut w)?;
-        }
-    }
-    Ok(())
+    extract_zip(archive, dest_dir, true)
 }

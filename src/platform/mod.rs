@@ -214,32 +214,6 @@ pub enum GitOutcome {
     Installed,
 }
 
-/// MinGit(Windows 便携版 git)版本。升级 = 改这两行并重测。
-/// 核实来源:npmmirror git-for-windows 镜像,2026-08 时最新稳定为 v2.55.0.windows.1;
-/// `.windows.1` 发行的 zip 文件名不带第四位(MinGit-<ver>-64-bit.zip)。
-#[cfg(any(windows, test))]
-pub const MINGIT_VERSION: &str = "2.55.0";
-#[cfg(any(windows, test))]
-pub const MINGIT_TAG: &str = "v2.55.0.windows.1";
-
-/// MinGit zip 文件名
-#[cfg(any(windows, test))]
-pub fn mingit_archive_name() -> String {
-    format!("MinGit-{MINGIT_VERSION}-64-bit.zip")
-}
-
-/// MinGit 下载 URL 容错链(npmmirror 主源 + CDN + 华为云兜底,均为国内可达 Mirror;
-/// 已交叉核验三源 200/302 可达,zip 根目录即 cmd/git.exe 无顶层包裹目录)
-#[cfg(any(windows, test))]
-pub fn mingit_urls() -> Vec<String> {
-    let file = mingit_archive_name();
-    vec![
-        format!("https://registry.npmmirror.com/-/binary/git-for-windows/{MINGIT_TAG}/{file}"),
-        format!("https://cdn.npmmirror.com/binaries/git-for-windows/{MINGIT_TAG}/{file}"),
-        format!("https://mirrors.huaweicloud.com/git-for-windows/{MINGIT_TAG}/{file}"),
-    ]
-}
-
 /// Windows git shim 内容(.cmd):转交前缀内 MinGit 的 cmd/git.exe
 #[cfg(any(windows, test))]
 pub fn git_shim_content(git_exe: &Path) -> String {
@@ -579,26 +553,6 @@ mod tests {
         assert!(s.starts_with("@echo off"));
         assert!(s.contains("set \"PATH=C:\\Users\\u\\.setup-coder\\node;%PATH%\""));
         assert!(s.contains(r"C:\Users\u\.setup-coder\npm\codex.cmd"));
-    }
-
-    #[test]
-    fn mingit_archive_name_matches_dist_layout() {
-        // `.windows.1` 发行的 zip 文件名不带第四位(已在 npmmirror 镜像核实)
-        assert_eq!(mingit_archive_name(), "MinGit-2.55.0-64-bit.zip");
-        assert!(MINGIT_TAG.contains(MINGIT_VERSION));
-    }
-
-    #[test]
-    fn mingit_urls_form_a_mirror_chain() {
-        let urls = mingit_urls();
-        assert!(urls.len() >= 3, "必须有容错链");
-        for u in &urls {
-            assert!(u.starts_with("https://"), "只允许 https:{u}");
-            assert!(u.contains(MINGIT_TAG), "URL 应含 tag:{u}");
-            assert!(u.ends_with(&mingit_archive_name()), "URL 应含文件名:{u}");
-        }
-        // 主源必须是 npmmirror(国内可达 Mirror)
-        assert!(urls[0].contains("npmmirror.com"));
     }
 
     #[test]

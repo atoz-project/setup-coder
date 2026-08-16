@@ -90,21 +90,6 @@ fn resolve_tools(tool: Option<&str>) -> Result<Vec<&'static Tool>, Box<dyn Error
     }
 }
 
-/// Node 发行包文件名:`node-vX.Y.Z-<suffix>.<ext>`
-fn node_archive_name(version: &str, suffix: &str, ext: &str) -> String {
-    format!("node-{version}-{suffix}.{ext}")
-}
-
-/// Node 下载 URL 容错链(npmmirror 主源 + CDN + 华为云兜底)
-fn node_urls(version: &str, suffix: &str, ext: &str) -> Vec<String> {
-    let file = node_archive_name(version, suffix, ext);
-    vec![
-        format!("https://registry.npmmirror.com/-/binary/node/{version}/{file}"),
-        format!("https://cdn.npmmirror.com/binaries/node/{version}/{file}"),
-        format!("https://mirrors.huaweicloud.com/nodejs/{version}/{file}"),
-    ]
-}
-
 /// 装 Node LTS:已是指定版本则跳过(幂等),否则下载解压替换(修复/升级)
 fn ensure_node(prefix: &Prefix, state: &mut State) -> Result<(), Box<dyn Error>> {
     if node_version_matches(prefix)? {
@@ -115,8 +100,8 @@ fn ensure_node(prefix: &Prefix, state: &mut State) -> Result<(), Box<dyn Error>>
         println!("下载 Node.js {NODE_VERSION}({suffix})…");
         let archive = prefix
             .cache_dir()
-            .join(node_archive_name(NODE_VERSION, suffix, ext));
-        let hit = net::download_first(&node_urls(NODE_VERSION, suffix, ext), &archive)?;
+            .join(net::node_archive_name(NODE_VERSION, suffix, ext));
+        let hit = net::download_first(&net::node_urls(NODE_VERSION, suffix, ext), &archive)?;
         println!("已从 Mirror 下载:{hit}");
 
         // 解压到暂存目录,成功后整体替换 node/(避免半残前缀)
@@ -339,27 +324,4 @@ mod tests {
         assert_eq!(tools.len(), 3);
     }
 
-    #[test]
-    fn node_archive_name_matches_dist_layout() {
-        assert_eq!(
-            node_archive_name("v24.19.0", "darwin-arm64", "tar.gz"),
-            "node-v24.19.0-darwin-arm64.tar.gz"
-        );
-        assert_eq!(
-            node_archive_name("v24.19.0", "win-x64", "zip"),
-            "node-v24.19.0-win-x64.zip"
-        );
-    }
-
-    #[test]
-    fn node_urls_form_a_mirror_chain() {
-        let urls = node_urls("v24.19.0", "linux-x64", "tar.gz");
-        assert!(urls.len() >= 2, "必须有容错链");
-        for u in &urls {
-            assert!(u.starts_with("https://"), "只允许 https:{u}");
-            assert!(u.contains("/v24.19.0/node-v24.19.0-linux-x64.tar.gz"));
-        }
-        // 主源必须是 npmmirror(ADR-0002)
-        assert!(urls[0].contains("npmmirror.com"));
-    }
 }
