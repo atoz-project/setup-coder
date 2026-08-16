@@ -81,11 +81,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          # 重打同名 tag / 重跑 workflow 时 Release 已存在:create 会失败,降级为覆盖上传
+          if ! gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "setup-coder $GITHUB_REF_NAME" \
             --generate-notes \
-            dist/* latest.json
+            dist/* latest.json; then
+            echo "::notice::Release $GITHUB_REF_NAME 已存在,改为覆盖上传产物"
+            gh release upload "$GITHUB_REF_NAME" dist/* latest.json \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          fi
 
       # one-liner 安装脚本属工单 #5,scripts/ 目录可能尚不存在 —— 存在才上传,不存在不报错。
       # latest.json 的 install 字段同样按存在与否填 null,结构已预留。

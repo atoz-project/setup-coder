@@ -13,10 +13,7 @@
 #   "tag": "v0.1.0",
 #   "download_base": "https://github.com/<owner>/<repo>/releases/download/<tag>/",
 #   "platforms": {
-#     "win-x64":   { "path": "setup-coder-win-x64.exe", "sha256": "<hex>" },
-#     "mac-arm64": { "path": "setup-coder-mac-arm64",   "sha256": "<hex>" },
-#     "mac-x64":   { "path": "setup-coder-mac-x64",     "sha256": "<hex>" },
-#     "linux-x64": { "path": "setup-coder-linux-x64",   "sha256": "<hex>" }
+#     "<target>": { "path": "setup-coder-<target>[.exe]", "url": "<完整下载 URL>", "sha256": "<hex>" }
 #   },
 #   "install": { "sh": "install.sh" | null, "ps1": "install.ps1" | null }
 # }
@@ -41,14 +38,15 @@ fi
 
 platforms='{}'
 count=0
+download_base="https://github.com/$repo/releases/download/$tag/"
 for f in "$dir"/setup-coder-*; do
   [ -f "$f" ] || continue
   base=$(basename "$f")
   target="${base#setup-coder-}"
   target="${target%.exe}"
   sum=$(sha256sum "$f" | cut -d' ' -f1)
-  platforms=$(jq --arg t "$target" --arg p "$base" --arg s "$sum" \
-    '. + {($t): {path: $p, sha256: $s}}' <<<"$platforms")
+  platforms=$(jq --arg t "$target" --arg p "$base" --arg u "$download_base$base" --arg s "$sum" \
+    '. + {($t): {path: $p, url: $u, sha256: $s}}' <<<"$platforms")
   count=$((count + 1))
 done
 
@@ -64,7 +62,7 @@ ps1_val=null; [ -f scripts/install.ps1 ] && ps1_val='"install.ps1"'
 jq -n \
   --arg version "$version" \
   --arg tag "$tag" \
-  --arg base "https://github.com/$repo/releases/download/$tag/" \
+  --arg base "$download_base" \
   --argjson platforms "$platforms" \
   --argjson sh "$sh_val" \
   --argjson ps1 "$ps1_val" \
