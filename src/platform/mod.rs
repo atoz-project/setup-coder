@@ -9,7 +9,12 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::prefix::PathInjection;
+use std::error::Error;
+use std::process::Command;
+#[cfg(any(target_os = "macos", test))]
+use std::time::Duration;
+
+use crate::prefix::{PathInjection, Prefix};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -197,6 +202,166 @@ pub fn path_activation_hint() -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Prerequisite:git(工单 #3)——纯逻辑与共享助手
+// ---------------------------------------------------------------------------
+
+/// git 安装结果(commands 层据此打印中文小结)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitOutcome {
+    /// 系统已有可用 git,未做任何改动
+    Skipped,
+    /// 本次装好了 git(Windows MinGit / macOS CLT / Ubuntu apt)
+    Installed,
+}
+
+/// MinGit(Windows 便携版 git)版本。升级 = 改这两行并重测。
+/// 核实来源:npmmirror git-for-windows 镜像,2026-08 时最新稳定为 v2.55.0.windows.1;
+/// `.windows.1` 发行的 zip 文件名不带第四位(MinGit-<ver>-64-bit.zip)。
+#[cfg(any(windows, test))]
+pub const MINGIT_VERSION: &str = "2.55.0";
+#[cfg(any(windows, test))]
+pub const MINGIT_TAG: &str = "v2.55.0.windows.1";
+
+/// MinGit zip 文件名
+#[cfg(any(windows, test))]
+pub fn mingit_archive_name() -> String {
+    format!("MinGit-{MINGIT_VERSION}-64-bit.zip")
+}
+
+/// MinGit 下载 URL 容错链(npmmirror 主源 + CDN + 华为云兜底,均为国内可达 Mirror;
+/// 已交叉核验三源 200/302 可达,zip 根目录即 cmd/git.exe 无顶层包裹目录)
+#[cfg(any(windows, test))]
+pub fn mingit_urls() -> Vec<String> {
+    let file = mingit_archive_name();
+    vec![
+        format!("https://registry.npmmirror.com/-/binary/git-for-windows/{MINGIT_TAG}/{file}"),
+        format!("https://cdn.npmmirror.com/binaries/git-for-windows/{MINGIT_TAG}/{file}"),
+        format!("https://mirrors.huaweicloud.com/git-for-windows/{MINGIT_TAG}/{file}"),
+    ]
+}
+
+/// Windows git shim 内容(.cmd):转交前缀内 MinGit 的 cmd/git.exe
+#[cfg(any(windows, test))]
+pub fn git_shim_content(git_exe: &Path) -> String {
+    format!(
+        "@echo off\r\n\
+         rem setup-coder shim: git(由 install 生成,重跑覆盖)\r\n\
+         \"{}\" %*\r\n\
+         exit /b %errorlevel%\r\n",
+        git_exe.display(),
+    )
+}
+
+/// 系统 PATH 上的 git 是否可用(`git --version` 通过)。
+/// macOS 无 CLT 时 /usr/bin/git 是 stub:本调用可能触发系统安装弹窗,属预期。
+pub(super) fn git_on_path_works() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// 指定路径的 git 可执行文件是否可用(Windows 检查前缀内 MinGit)
+#[cfg(any(windows, test))]
+pub(super) fn git_works_at(exe: &Path) -> bool {
+    exe.exists()
+        && Command::new(exe)
+            .arg("--version")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+}
+
+/// 轮询等待:每 `interval` 调一次 `check`,通过返回 true,`timeout` 内未通过返回 false。
+/// 可单测的等待接缝(macOS 等 CLT 安装用)。
+#[cfg(any(target_os = "macos", test))]
+pub fn wait_until(
+    mut check: impl FnMut() -> bool,
+    timeout: Duration,
+    interval: Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if check() {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+/// 在 PATH 目录清单中查找可执行文件(Ubuntu 检测 sudo 用)
+#[cfg(any(target_os = "linux", all(unix, test)))]
+pub fn find_in_path(name: &str, path_var: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path_var).find_map(|dir| {
+        let candidate = dir.join(name);
+        if is_executable(&candidate) {
+            Some(candidate)
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(any(target_os = "linux", all(unix, test)))]
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.is_file()
+            && path
+                .metadata()
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        path.is_file()
+    }
+}
+
+/// Ubuntu:无 sudo 时的中文报错(含手工命令)
+#[cfg(any(target_os = "linux", test))]
+pub fn no_sudo_error() -> String {
+    "未检测到 git,且当前环境没有 sudo,无法自动安装。\
+     请用有管理员权限的账户手工执行以下命令后重跑 install:\n  \
+     apt-get update && apt-get install -y git"
+        .to_string()
+}
+
+/// Ubuntu:apt 失败时的中文报错(含手工命令)
+#[cfg(any(target_os = "linux", test))]
+pub fn apt_install_failed_error() -> String {
+    "通过 apt 安装 git 失败。可能是软件源未更新或网络问题,请手工执行以下命令后重跑 install:\n  \
+     sudo apt-get update && sudo apt-get install -y git"
+        .to_string()
+}
+
+/// macOS:等待 CLT 安装的超时与轮询间隔(弹窗后用户手工点击,下载可能较慢)
+#[cfg(any(target_os = "macos", test))]
+pub const GIT_WAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+#[cfg(any(target_os = "macos", test))]
+pub const GIT_POLL_INTERVAL: Duration = Duration::from_secs(15);
+
+/// macOS:触发弹窗后的中文提示
+#[cfg(any(target_os = "macos", test))]
+pub fn clt_prompt_message() -> &'static str {
+    "git 需要 Xcode 命令行工具。已触发安装弹窗:请在弹窗中点击「安装」并同意协议;\
+     如未看到弹窗,请手工执行 xcode-select --install"
+}
+
+/// macOS:等待超时的中文报错(含手工命令)
+#[cfg(any(target_os = "macos", test))]
+pub fn clt_wait_timeout_error() -> String {
+    "等待 Xcode 命令行工具安装超时(仍未检测到 git)。\
+     请确认安装弹窗中的流程已完成,或手工执行 xcode-select --install 后重跑 install"
+        .to_string()
+}
+
+// ---------------------------------------------------------------------------
 // 平台薄接缝(文件系统/注册表操作,分派到 imp)
 // ---------------------------------------------------------------------------
 
@@ -218,6 +383,12 @@ pub fn write_shim(
 /// 把 setup-coder 本体复制进 `bin_dir`(与 PATH 注入配合,uninstall 才能整体回收)。
 pub fn install_self(bin_dir: &Path) -> io::Result<PathBuf> {
     imp::install_self(bin_dir)
+}
+
+/// Prerequisite:确保 git 可用(工单 #3)。
+/// 已有 git → Skipped;否则按平台装(Windows MinGit / macOS CLT / Ubuntu apt)。
+pub fn ensure_git(prefix: &Prefix) -> Result<GitOutcome, Box<dyn Error>> {
+    imp::ensure_git(prefix)
 }
 
 /// 解压 Node 发行包到 `dest_dir`(剥掉顶层 `node-vX-…/` 一层)。
@@ -408,5 +579,126 @@ mod tests {
         assert!(s.starts_with("@echo off"));
         assert!(s.contains("set \"PATH=C:\\Users\\u\\.setup-coder\\node;%PATH%\""));
         assert!(s.contains(r"C:\Users\u\.setup-coder\npm\codex.cmd"));
+    }
+
+    #[test]
+    fn mingit_archive_name_matches_dist_layout() {
+        // `.windows.1` 发行的 zip 文件名不带第四位(已在 npmmirror 镜像核实)
+        assert_eq!(mingit_archive_name(), "MinGit-2.55.0-64-bit.zip");
+        assert!(MINGIT_TAG.contains(MINGIT_VERSION));
+    }
+
+    #[test]
+    fn mingit_urls_form_a_mirror_chain() {
+        let urls = mingit_urls();
+        assert!(urls.len() >= 3, "必须有容错链");
+        for u in &urls {
+            assert!(u.starts_with("https://"), "只允许 https:{u}");
+            assert!(u.contains(MINGIT_TAG), "URL 应含 tag:{u}");
+            assert!(u.ends_with(&mingit_archive_name()), "URL 应含文件名:{u}");
+        }
+        // 主源必须是 npmmirror(国内可达 Mirror)
+        assert!(urls[0].contains("npmmirror.com"));
+    }
+
+    #[test]
+    fn git_shim_delegates_to_mingit_exe() {
+        let s = git_shim_content(Path::new(r"C:\Users\u\.setup-coder\git\cmd\git.exe"));
+        assert!(s.starts_with("@echo off"));
+        assert!(s.contains("\"C:\\Users\\u\\.setup-coder\\git\\cmd\\git.exe\" %*"));
+        assert!(s.contains("exit /b %errorlevel%"));
+    }
+
+    #[test]
+    fn wait_until_returns_immediately_when_already_true() {
+        assert!(wait_until(
+            || true,
+            Duration::from_millis(1),
+            Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn wait_until_passes_when_check_flips() {
+        let mut calls = 0;
+        let ok = wait_until(
+            || {
+                calls += 1;
+                calls >= 3
+            },
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+        );
+        assert!(ok);
+        assert_eq!(calls, 3, "第三次检查通过即停");
+    }
+
+    #[test]
+    fn wait_until_times_out_when_never_true() {
+        let ok = wait_until(
+            || false,
+            Duration::from_millis(10),
+            Duration::from_millis(1),
+        );
+        assert!(!ok);
+    }
+
+    #[test]
+    fn git_works_at_checks_a_specific_exe() {
+        // 不存在的路径 → false
+        assert!(!git_works_at(Path::new("/nonexistent/git")));
+        // 造一个假的 git 可执行脚本 → true
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir =
+                std::env::temp_dir().join(format!("setup-coder-test-git-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let fake = dir.join("git");
+            fs::write(&fake, "#!/bin/sh\necho 'git version 2.55.0'\n").unwrap();
+            fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(git_works_at(&fake));
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_in_path_only_matches_executable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("setup-coder-test-path-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path_var = std::ffi::OsString::from(&dir);
+
+        // 不存在 → None
+        assert!(find_in_path("sudo", &path_var).is_none());
+        // 存在但不可执行 → None
+        fs::write(dir.join("sudo"), "").unwrap();
+        assert!(find_in_path("sudo", &path_var).is_none());
+        // 加可执行位 → 命中
+        fs::set_permissions(dir.join("sudo"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(find_in_path("sudo", &path_var).unwrap(), dir.join("sudo"));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn linux_error_messages_give_manual_command_in_chinese() {
+        let no_sudo = no_sudo_error();
+        assert!(no_sudo.contains("apt-get install -y git"), "应给手工命令:{no_sudo}");
+        assert!(no_sudo.contains("没有 sudo"));
+        let apt_failed = apt_install_failed_error();
+        assert!(apt_failed.contains("sudo apt-get update"));
+        assert!(apt_failed.contains("sudo apt-get install -y git"));
+    }
+
+    #[test]
+    fn macos_wait_config_and_messages_are_sane() {
+        assert!(GIT_POLL_INTERVAL < GIT_WAIT_TIMEOUT, "轮询间隔必须小于超时");
+        assert!(clt_prompt_message().contains("xcode-select --install"));
+        assert!(clt_wait_timeout_error().contains("xcode-select --install"));
     }
 }

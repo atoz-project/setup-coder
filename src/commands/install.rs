@@ -1,7 +1,7 @@
 //! `install` 子命令:装 Node.js 与 Tool 进 Private Prefix,零输入完成。
 //!
-//! 流水线:建前缀骨架 → 装 Node LTS(npmmirror)→ 复制 setup-coder 本体 →
-//! npm 装 Tool(注册表)→ 生成 shim → 冒烟(`--version`,Installed 定义)→
+//! 流水线:建前缀骨架 → 装 Node LTS(npmmirror)→ 确保 git(Prerequisite,工单 #3)→
+//! 复制 setup-coder 本体 → npm 装 Tool(注册表)→ 生成 shim → 冒烟(`--version`,Installed 定义)→
 //! 注入 PATH → 写 state.json。重跑 = 修复/升级,幂等。
 
 use std::error::Error;
@@ -41,6 +41,7 @@ fn install(tool: Option<&str>) -> Result<(), Box<dyn Error>> {
     prefix.create_skeleton()?;
 
     ensure_node(&prefix, &mut state)?;
+    ensure_git(&prefix)?;
     install_setup_coder_self(&prefix)?;
     write_npmrc(&prefix)?;
 
@@ -151,6 +152,15 @@ fn node_version_matches(prefix: &Prefix) -> Result<bool, Box<dyn Error>> {
         return Ok(false); // 跑不起来 = 当作未装,重装修复
     };
     Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == NODE_VERSION)
+}
+
+/// Prerequisite:确保 git 可用(工单 #3;平台做法收敛在 platform/)
+fn ensure_git(prefix: &Prefix) -> Result<(), Box<dyn Error>> {
+    match platform::ensure_git(prefix)? {
+        platform::GitOutcome::Skipped => println!("git 已可用,跳过安装"),
+        platform::GitOutcome::Installed => println!("git 安装完成"),
+    }
+    Ok(())
 }
 
 /// 把 setup-coder 本体复制进前缀 bin/(布局约定:bin/ 含本体 + shim)

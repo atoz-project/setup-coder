@@ -80,10 +80,17 @@ impl Prefix {
     }
 
     /// `git/`:仅 Windows 的 MinGit 便携版目录
-    // TODO(工单 #3):git 安装流水线会用到这里
+    // 仅 Windows 的 git 安装流水线使用;unix 构建中保留以固定布局(死代码豁免)
     #[allow(dead_code)]
     pub fn git_dir(&self) -> PathBuf {
         self.root.join("git")
+    }
+
+    /// MinGit 可执行文件:`git/cmd/git.exe`(MinGit zip 根目录即 cmd/,见工单 #3 交叉核验)
+    // 仅 Windows 使用
+    #[allow(dead_code)]
+    pub fn git_exe(&self) -> PathBuf {
+        self.git_dir().join("cmd").join(platform::exe_name("git"))
     }
 
     /// `cache/`:下载缓存,可整删,重跑自动补
@@ -202,6 +209,11 @@ mod tests {
         assert_eq!(p.node_dir(), Path::new("/home/u/.setup-coder/node"));
         assert_eq!(p.npm_dir(), Path::new("/home/u/.setup-coder/npm"));
         assert_eq!(p.git_dir(), Path::new("/home/u/.setup-coder/git"));
+        assert!(p.git_exe().ends_with(if cfg!(windows) {
+            "git/cmd/git.exe"
+        } else {
+            "git/cmd/git"
+        }));
         assert_eq!(p.cache_dir(), Path::new("/home/u/.setup-coder/cache"));
         assert_eq!(p.state_path(), Path::new("/home/u/.setup-coder/state.json"));
         assert_eq!(p.npmrc(), Path::new("/home/u/.setup-coder/.npmrc"));
@@ -229,10 +241,12 @@ mod tests {
         // 不存在 = 空清单
         assert_eq!(State::load(&p).unwrap(), State::default());
 
-        let mut s = State::default();
-        s.node = Some(NodeState {
-            version: "v24.19.0".into(),
-        });
+        let mut s = State {
+            node: Some(NodeState {
+                version: "v24.19.0".into(),
+            }),
+            ..State::default()
+        };
         s.tools.push(ToolState {
             name: "codex".into(),
             package: "@openai/codex".into(),

@@ -1,10 +1,12 @@
 //! Windows 薄接缝:PATH 注入写 HKCU 用户 PATH,shim 为 .cmd,Node 为 zip。
 
+use std::error::Error;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::prefix::PathInjection;
+use crate::net;
+use crate::prefix::{PathInjection, Prefix};
 
 /// 把 bin_dir 追加进 HKCU 用户 PATH(幂等,保留原有 REG_EXPAND_SZ 类型)。
 pub fn ensure_path(bin_dir: &Path) -> io::Result<Vec<PathInjection>> {
@@ -71,6 +73,68 @@ pub fn install_self(bin_dir: &Path) -> io::Result<PathBuf> {
     }
     fs::copy(&current, &dest)?;
     Ok(dest)
+}
+
+/// 确保 git 可用:系统已有 → 跳过;否则下载 MinGit 便携版解进前缀 `git/`,
+/// 并在 `bin/` 生成 git shim(shim 在前缀内,无需 state.json 记录;PATH 上只有 bin/)。
+pub fn ensure_git(prefix: &Prefix) -> Result<super::GitOutcome, Box<dyn Error>> {
+    if super::git_on_path_works() {
+        return Ok(super::GitOutcome::Skipped);
+    }
+    let git_exe = prefix.git_exe();
+    if !super::git_works_at(&git_exe) {
+        println!("下载 MinGit {} 便携版…", super::MINGIT_VERSION);
+        let archive = prefix.cache_dir().join(super::mingit_archive_name());
+        let hit = net::download_first(&super::mingit_urls(), &archive)?;
+        println!("已从 Mirror 下载:{hit}");
+
+        // 解压到暂存目录,成功后整体替换 git/(避免半残前缀;MinGit zip 根目录即 cmd/,不剥层)
+        let staging = prefix.cache_dir().join("git-staging");
+        let _ = fs::remove_dir_all(&staging);
+        extract_mingit_zip(&archive, &staging)?;
+        let git_dir = prefix.git_dir();
+        let _ = fs::remove_dir_all(&git_dir);
+        fs::rename(&staging, &git_dir)?;
+
+        // 自检:刚解压的 git 必须能跑
+        if !super::git_works_at(&git_exe) {
+            return Err("MinGit 解压后自检失败:`git --version` 未通过".into());
+        }
+    }
+
+    // shim 进 bin/(与 Tool 同一处理:bin/ 是 Private Prefix 对外的唯一可见面)
+    fs::create_dir_all(prefix.bin_dir())?;
+    let shim = prefix.bin_dir().join(super::shim_file_name("git"));
+    fs::write(&shim, super::git_shim_content(&git_exe))?;
+    println!("git shim:{}", shim.display());
+    Ok(super::GitOutcome::Installed)
+}
+
+/// MinGit zip 解压:不剥顶层(zip 根目录即 cmd/、mingw64/ 等)。
+fn extract_mingit_zip(archive: &Path, dest_dir: &Path) -> io::Result<()> {
+    let file = fs::File::open(archive)?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("zip 损坏:{e}")))?;
+    fs::create_dir_all(dest_dir)?;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let Some(path) = entry.enclosed_name() else {
+            continue;
+        };
+        let out = dest_dir.join(path);
+        if entry.is_dir() {
+            fs::create_dir_all(&out)?;
+        } else {
+            if let Some(parent) = out.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut w = fs::File::create(&out)?;
+            io::copy(&mut entry, &mut w)?;
+        }
+    }
+    Ok(())
 }
 
 /// Windows:zip 解压,剥掉顶层目录一层。
