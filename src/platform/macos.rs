@@ -7,9 +7,17 @@ use std::process::Command;
 
 use crate::prefix::{PathInjection, Prefix};
 
+/// PATH 注入/体检共用的 shell rc 文件清单(macOS 默认 zsh,bash 读 .bash_profile)
+const RC_FILES: &[&str] = &[".zshrc", ".bash_profile"];
+
 pub fn ensure_path(bin_dir: &Path) -> io::Result<Vec<PathInjection>> {
     // macOS 默认 zsh(登录 shell 读 .zshrc);bash 登录 shell 读 .bash_profile
-    super::ensure_path_via_shell_rc(bin_dir, &[".zshrc", ".bash_profile"])
+    super::ensure_path_via_shell_rc(bin_dir, RC_FILES)
+}
+
+/// doctor:PATH 持久化体检(与 ensure_path 同一份 rc 文件清单)
+pub fn path_persisted(bin_dir: &Path) -> io::Result<bool> {
+    super::path_persisted_via_shell_rc(bin_dir, RC_FILES)
 }
 
 /// git 版本:macOS 只用系统 git(在前缀外,doctor 只报告;与 install 同一检测路径)

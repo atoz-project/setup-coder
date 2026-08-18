@@ -9,6 +9,10 @@
 # 职责(脚本只做"下载二进制并转交",逻辑全在二进制里):
 #   探测平台/架构 → 取 latest.json → 按容错链下载对应二进制
 #   → sha256 校验 → 放入 %USERPROFILE%\.setup-coder\bin\ → 执行 setup-coder install
+#   → 兜底:把 bin 目录幂等写入用户 PATH(HKCU Environment + 广播 WM_SETTINGCHANGE)
+# 例外(ARCHITECTURE.md):PATH 持久化兜底是工单 #9 的实战修复——二进制写注册表
+# 在用户现场可能失败(见 GitHub issue #9),One-liner 作为用户入口必须在成功后
+# 亲自确认 PATH 已持久化,否则小白「装完命令找不到」无法自救。
 
 # ===== 下载容错链配置(维护者只改这里)=====
 #
@@ -66,6 +70,48 @@ function Get-BinaryUrls([string]$path, [string]$url) {
   foreach ($p in $GITHUB_PREFIXES) { $urls += "$p$url" }
   $urls += $url
   return $urls
+}
+
+# 把 $dir 幂等追加进用户 PATH(HKCU\Environment\Path)。
+# 返回 $true = 本次有写入;$false = 已存在,无副作用(重跑/幂等轮安全)。
+# 读原始值(DoNotExpandEnvironmentNames)并保留原有类型(用户 PATH 常为 REG_EXPAND_SZ,
+# 若用 [Environment]::SetEnvironmentVariable 会把它降级成 REG_SZ,破坏 %VAR% 展开)。
+# 幂等比较规则与二进制内 windows_path_merge 一致:忽略大小写、首尾空白与尾部 \ /。
+function Ensure-UserPath([string]$dir) {
+  $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+  try {
+    $raw = $key.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $existing = if ($null -eq $raw) { '' } else { [string]$raw }
+    $target = $dir.Trim().TrimEnd('\', '/')
+    foreach ($entry in ($existing -split ';')) {
+      $norm = $entry.Trim().TrimEnd('\', '/')
+      if ($norm -and ($norm -ieq $target)) { return $false }
+    }
+    $merged = if ($existing.Trim().Length -eq 0) { $dir.Trim() } else { $existing.TrimEnd(';') + ';' + $dir.Trim() }
+    $kind = if ($null -ne $raw) { $key.GetValueKind('Path') } else { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+    $key.SetValue('Path', $merged, $kind)
+    return $true
+  } finally {
+    $key.Dispose()
+  }
+}
+
+# 广播 WM_SETTINGCHANGE,通知资源管理器等外壳程序环境变量已变(新开的终端才能读到新 PATH)。
+# 失败不致命:即便广播没发出去,注销重登或重启后同样生效,只 Warn 不 throw。
+function Broadcast-EnvironmentChange {
+  try {
+    if (-not ('SetupCoder.NativeBroadcast' -as [type])) {
+      $sig = '[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)] public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint Msg, System.UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out System.UIntPtr lpdwResult);'
+      Add-Type -MemberDefinition $sig -Name 'NativeBroadcast' -Namespace 'SetupCoder' -ErrorAction Stop
+    }
+    $HWND_BROADCAST = [System.IntPtr]0xffff
+    $WM_SETTINGCHANGE = 0x1Au
+    $SMTO_ABORTIFHUNG = 0x2u
+    $result = [System.UIntPtr]::Zero
+    [void][SetupCoder.NativeBroadcast]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [System.UIntPtr]::Zero, 'Environment', $SMTO_ABORTIFHUNG, 5000, [ref]$result)
+  } catch {
+    Warn "环境变量变更广播未发出(不影响写入结果;注销重登或重启后同样生效)。"
+  }
 }
 
 # 下载 $url 到 $outFile,成功返回 $true,失败(超时/404/断连)返回 $false 由调用方换源
@@ -145,8 +191,20 @@ try {
     Fail "二进制已就位,但 setup-coder install 执行失败。`n你可以稍后手动重跑:`"$dest`" install`n若反复失败,请到 https://github.com/$GITHUB_REPO/issues 反馈。"
   }
 
+  Step "第 6 步:把 bin 目录写入用户 PATH(持久化)"
+  # 兜底写入(工单 #9):二进制 install 内部也会写,这里作为用户入口亲自确认,
+  # 保证「装完新开终端命令可用」。幂等:已存在则不重复写、不重复广播。
+  if (Ensure-UserPath $binDir) {
+    Say "已写入用户环境变量 Path:$binDir"
+    Broadcast-EnvironmentChange
+  } else {
+    Say "用户环境变量 Path 已包含 $binDir,无需改动。"
+  }
+  # 当前窗口也立即可用(持久化对新开终端生效,本窗口手动补一份)
+  if (($env:Path -split ';') -notcontains $binDir) { $env:Path = "$binDir;$env:Path" }
+
   Say ""
-  Say "全部完成!重新打开一个终端窗口即可使用。"
+  Say "全部完成!PATH 已持久化,当前窗口可直接使用;重新打开终端窗口同样生效。"
 } catch {
   Write-Host $_ -ForegroundColor Red
   Write-Host "安装未完成。你可以把上面的错误信息截图,到 https://github.com/$GITHUB_REPO/issues 反馈。" -ForegroundColor Red

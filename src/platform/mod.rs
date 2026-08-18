@@ -130,13 +130,19 @@ pub fn shell_rc_remove(existing: &str, line: &str) -> Option<String> {
     Some(new)
 }
 
+/// shell rc 内容中是否已有该 export 行(trim 比较,与 append/remove 的幂等判断同规则)。
+/// doctor 的「PATH 已持久化」体检(工单 #9)用。
+#[cfg(any(unix, test))]
+pub fn shell_rc_contains(existing: &str, export_line: &str) -> bool {
+    existing
+        .lines()
+        .any(|line| line.trim() == export_line.trim())
+}
+
 /// shell rc 幂等追加:内容中已有该行则返回 None,否则返回追加后的完整新内容。
 #[cfg(any(unix, test))]
 pub fn shell_rc_append(existing: &str, export_line: &str) -> Option<String> {
-    if existing
-        .lines()
-        .any(|line| line.trim() == export_line.trim())
-    {
+    if shell_rc_contains(existing, export_line) {
         return None;
     }
     let mut new = existing.to_string();
@@ -148,19 +154,27 @@ pub fn shell_rc_append(existing: &str, export_line: &str) -> Option<String> {
     Some(new)
 }
 
-/// Windows 用户 PATH 幂等合并:已含该目录(忽略大小写、忽略首尾 `\`/`/` 与空白)
-/// 则返回 None,否则返回合并后的完整 PATH。
+/// Windows 用户 PATH 条目归一化(幂等比较共用):忽略大小写、首尾空白与尾部 `\`/`/`。
+#[cfg(any(windows, test))]
+fn normalize_windows_path_entry(s: &str) -> String {
+    s.trim().trim_end_matches(['\\', '/']).to_ascii_lowercase()
+}
+
+/// Windows 用户 PATH 是否已含该目录(与 merge/remove 同一归一化)。
+/// install 的幂等判断与 doctor 的「PATH 已持久化」体检(工单 #9)共用。
+#[cfg(any(windows, test))]
+pub fn windows_path_contains(existing: &str, dir: &str) -> bool {
+    let target = normalize_windows_path_entry(dir);
+    existing
+        .split(';')
+        .map(normalize_windows_path_entry)
+        .any(|entry| !entry.is_empty() && entry == target)
+}
+
+/// Windows 用户 PATH 幂等合并:已含该目录则返回 None,否则返回合并后的完整 PATH。
 #[cfg(any(windows, test))]
 pub fn windows_path_merge(existing: &str, dir: &str) -> Option<String> {
-    fn normalize(s: &str) -> String {
-        s.trim().trim_end_matches(['\\', '/']).to_ascii_lowercase()
-    }
-    let target = normalize(dir);
-    if existing
-        .split(';')
-        .map(normalize)
-        .any(|entry| !entry.is_empty() && entry == target)
-    {
+    if windows_path_contains(existing, dir) {
         return None;
     }
     let mut new = existing.trim_end_matches(';').to_string();
@@ -277,20 +291,6 @@ pub fn path_contains_dir(path_var: &std::ffi::OsStr, dir: &Path) -> bool {
     }
     let target = normalize(dir);
     std::env::split_paths(path_var).any(|p| normalize(&p) == target)
-}
-
-/// doctor 体检时 PATH 未生效的指引文案(平台文案分叉收敛于此)
-pub fn path_not_effective_hint(bin_dir: &Path) -> String {
-    if cfg!(windows) {
-        format!(
-            "新开一个终端窗口后重跑 doctor;若仍未生效,请确认用户环境变量 Path 中含有 {}",
-            bin_dir.display()
-        )
-    } else {
-        "新开终端(或 source 对应 rc 文件)后重跑 doctor;若仍未生效,请确认 rc 文件中 \
-         有 # setup-coder 标记的 PATH 行"
-            .to_string()
-    }
 }
 
 /// 删除 `root` 下除 `keep` 文件及其祖先目录外的全部内容(Windows 自身 exe 残留策略用)。
@@ -485,6 +485,22 @@ pub fn ensure_path(bin_dir: &Path) -> io::Result<Vec<PathInjection>> {
     imp::ensure_path(bin_dir)
 }
 
+/// doctor 体检:PATH 持久化载体(Windows:HKCU 用户 Path;unix:shell rc 文件)
+/// 是否已含 bin_dir。不依赖当前会话环境变量——这是工单 #9 的核心检查项。
+/// 只读;读取出错返回 Err 由 doctor 报告。
+pub fn path_persisted(bin_dir: &Path) -> io::Result<bool> {
+    imp::path_persisted(bin_dir)
+}
+
+/// doctor 输出用:本平台 PATH 持久化载体的中文描述(平台文案分叉收敛于此)
+pub fn path_persistence_location() -> &'static str {
+    if cfg!(windows) {
+        "用户环境变量 Path(注册表 HKCU\\Environment)"
+    } else {
+        "shell rc 文件(# setup-coder 标记行)"
+    }
+}
+
 /// 生成 shim 到 `bin_dir`(重跑覆盖)。
 pub fn write_shim(
     bin_dir: &Path,
@@ -571,6 +587,31 @@ pub(super) fn ensure_path_via_shell_rc(
         }
     }
     Ok(injections)
+}
+
+/// unix 共享:PATH 持久化体检——任一用户 rc 文件含 export 行即视为已持久化。
+/// 与 ensure_path_via_shell_rc 用同一份 rc 文件清单(由各平台薄接缝传入)。
+#[cfg(unix)]
+pub(super) fn path_persisted_via_shell_rc(
+    bin_dir: &Path,
+    rc_file_names: &[&str],
+) -> io::Result<bool> {
+    let home = std::env::home_dir().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "无法确定用户家目录(HOME 未设置)")
+    })?;
+    let export_line = shell_rc_export_line(bin_dir);
+    for name in rc_file_names {
+        match fs::read_to_string(home.join(name)) {
+            Ok(text) => {
+                if shell_rc_contains(&text, &export_line) {
+                    return Ok(true);
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(unix)]
@@ -689,6 +730,37 @@ mod tests {
         // 无结尾换行的文件 → 移除后不引入多余空行
         let no_nl = format!("export FOO=1\n{line}");
         assert_eq!(shell_rc_remove(&no_nl, &line).unwrap(), "export FOO=1\n");
+    }
+
+    #[test]
+    fn windows_path_contains_shares_merge_normalization() {
+        let dir = r"C:\Users\u\.setup-coder\bin";
+        // 未含 → false(空串、其他目录、前缀相似目录)
+        assert!(!windows_path_contains("", dir));
+        assert!(!windows_path_contains(r"C:\Windows", dir));
+        assert!(!windows_path_contains(r"C:\Users\u\.setup-coder\bin2", dir));
+        // 已含 → true(含大小写/尾斜杠/空白差异,与 merge 同一归一化)
+        assert!(windows_path_contains(dir, dir));
+        assert!(windows_path_contains(&format!(r"C:\Windows;{dir}"), dir));
+        assert!(windows_path_contains(r"c:\users\u\.setup-coder\bin", dir));
+        assert!(windows_path_contains(r"C:\Users\u\.setup-coder\bin\", dir));
+        assert!(windows_path_contains(
+            &format!(r"C:\Windows; {dir} ;C:\Tools"),
+            dir
+        ));
+    }
+
+    #[test]
+    fn shell_rc_contains_matches_append_idempotency_rule() {
+        let line = shell_rc_export_line(Path::new("/home/u/.setup-coder/bin"));
+        assert!(!shell_rc_contains("", &line));
+        assert!(!shell_rc_contains("export FOO=1\n", &line));
+        assert!(shell_rc_contains(&format!("export FOO=1\n{line}\n"), &line));
+        // 行首尾有空白也算已存在(与 append 幂等判断同规则)
+        assert!(shell_rc_contains(&format!("  {line}  \n"), &line));
+        // 相似但不同的路径不命中
+        let other = shell_rc_export_line(Path::new("/home/u/.setup-coder/bin2"));
+        assert!(!shell_rc_contains(&format!("{other}\n"), &line));
     }
 
     #[test]

@@ -7,9 +7,17 @@ use std::process::Command;
 
 use crate::prefix::{PathInjection, Prefix};
 
+/// PATH 注入/体检共用的 shell rc 文件清单(Ubuntu 默认 bash,zsh 次之)
+const RC_FILES: &[&str] = &[".bashrc", ".zshrc"];
+
 pub fn ensure_path(bin_dir: &Path) -> io::Result<Vec<PathInjection>> {
     // Ubuntu 默认 bash(读 .bashrc);zsh 用户读 .zshrc,一并处理
-    super::ensure_path_via_shell_rc(bin_dir, &[".bashrc", ".zshrc"])
+    super::ensure_path_via_shell_rc(bin_dir, RC_FILES)
+}
+
+/// doctor:PATH 持久化体检(与 ensure_path 同一份 rc 文件清单)
+pub fn path_persisted(bin_dir: &Path) -> io::Result<bool> {
+    super::path_persisted_via_shell_rc(bin_dir, RC_FILES)
 }
 
 /// git 版本:Ubuntu 只用系统 git(apt 所装,在前缀外,doctor 只报告)
