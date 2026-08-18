@@ -1,6 +1,6 @@
 //! `doctor` 子命令:体检 Private Prefix 内的安装状态(只读,不改动任何东西)。
 //!
-//! 逐项输出 ✓/✗:平台/架构、Node.js、git、注册表各 Tool、PATH 是否生效、
+//! 逐项输出 ✓/✗:平台/架构、Node.js、git、注册表各 Tool、PATH 持久化与生效、
 //! Mirror 连通性;每个 ✗ 附「下一步」中文指引。全部通过退出码 0,否则非 0。
 //! 未安装(无前缀)时不 panic,报告「尚未安装,先跑 install」。
 
@@ -95,17 +95,45 @@ fn doctor() -> i32 {
         }
     }
 
+    // PATH 是否持久化(工单 #9):直接查持久化载体(Windows 注册表 / unix rc 文件),
+    // 不依赖当前会话——这是「装完新开终端命令找不到」的决定性检查。
+    let persisted = match platform::path_persisted(&prefix.bin_dir()) {
+        Ok(true) => {
+            println!(
+                "✓ PATH 已持久化:{} 含 {}",
+                platform::path_persistence_location(),
+                prefix.bin_dir().display()
+            );
+            Some(true)
+        }
+        Ok(false) => {
+            println!(
+                "✗ PATH 未持久化:{} 不含 {}",
+                platform::path_persistence_location(),
+                prefix.bin_dir().display()
+            );
+            println!("  → 下一步:重跑 setup-coder install(会自动修复 PATH 持久化)");
+            failures += 1;
+            Some(false)
+        }
+        Err(e) => {
+            println!("✗ PATH 持久化状态读取失败:{e}");
+            println!("  → 下一步:重跑 setup-coder install 修复;若反复失败请到 GitHub 提 issue 反馈");
+            failures += 1;
+            None
+        }
+    };
+
     // PATH 是否生效:当前进程 PATH 是否含前缀 bin/
     let path_var = std::env::var_os("PATH").unwrap_or_default();
     if platform::path_contains_dir(&path_var, &prefix.bin_dir()) {
-        println!("✓ PATH:{} 已生效", prefix.bin_dir().display());
+        println!("✓ PATH 当前会话已生效");
+    } else if persisted == Some(true) {
+        // 已持久化:新开的终端即生效,当前窗口未生效只是会话陈旧,不算待处理项
+        println!("− PATH 当前会话未生效:已持久化,新开一个终端窗口即生效");
     } else {
-        println!("✗ PATH:{} 不在当前 PATH 中", prefix.bin_dir().display());
-        println!(
-            "  → 下一步:{}",
-            platform::path_not_effective_hint(&prefix.bin_dir())
-        );
-        failures += 1;
+        // 未持久化(或读取失败)已在上面计失败并给指引,此处不重复计
+        println!("− PATH 当前会话未生效:随持久化修复后,新开终端即生效");
     }
 
     // Mirror 连通性:轻量 HEAD,不下载大包

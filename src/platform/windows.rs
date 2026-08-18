@@ -34,6 +34,29 @@ pub fn ensure_path(bin_dir: &Path) -> io::Result<Vec<PathInjection>> {
     }])
 }
 
+/// doctor:PATH 持久化体检——读 HKCU\Environment\Path 原始值(不展开 %VAR%),
+/// 与 install 幂等判断同一归一化(windows_path_contains)。只读,不改动注册表。
+pub fn path_persisted(bin_dir: &Path) -> io::Result<bool> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let env = match hkcu.open_subkey("Environment") {
+        Ok(key) => key,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let raw = match env.get_raw_value("Path") {
+        Ok(v) => v,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    Ok(super::windows_path_contains(
+        &raw.to_string(),
+        &bin_dir.to_string_lossy(),
+    ))
+}
+
 /// 写 HKCU 用户 Path:保留原有 REG_EXPAND_SZ 类型(ensure_path / rollback_injection 共用)。
 /// REG_EXPAND_SZ 无现成构造函数:手工编码为带 NUL 结尾的 UTF-16LE。
 fn set_user_path(
