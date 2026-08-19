@@ -1,6 +1,6 @@
 [package]
 name = "setup-coder"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "面向中国网络环境的 AI 编程 CLI 安装器"
 
