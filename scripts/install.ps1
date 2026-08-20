@@ -186,8 +186,16 @@ try {
 
   Step "第 5 步:启动安装(setup-coder install)"
   Say "接下来由 setup-coder 自动装好前置依赖(Node.js、git)和各 Tool,全程无需输入。"
+  # PS5.1 兼容(工单 #11):无控制台通道(WinRM/SSH/调用方重定向 PS 流)下,
+  # EAP=Stop 会把原生子进程的任何 stderr 输出包装成 NativeCommandError 直接 throw——
+  # npm v11 的 allow-scripts 警告必写 stderr,不处理则此处必挂,第 6 步永不执行。
+  # 局部放宽为 Continue:stderr 照常显示但不中断;失败语义由 LASTEXITCODE 显式检查兜底,不变。
+  $prevEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
   & $dest install
-  if ($LASTEXITCODE -ne 0) {
+  $installExitCode = $LASTEXITCODE
+  $ErrorActionPreference = $prevEap
+  if ($installExitCode -ne 0) {
     Fail "二进制已就位,但 setup-coder install 执行失败。`n你可以稍后手动重跑:`"$dest`" install`n若反复失败,请到 https://github.com/$GITHUB_REPO/issues 反馈。"
   }
 
