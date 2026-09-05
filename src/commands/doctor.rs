@@ -5,6 +5,7 @@
 //! 未安装(无前缀)时不 panic,报告「尚未安装,先跑 install」。
 
 use crate::net;
+use crate::node_source;
 use crate::platform;
 use crate::prefix::{Prefix, State};
 use crate::registry;
@@ -56,10 +57,12 @@ fn doctor() -> i32 {
         }
     };
 
+    // 经唯一解析接缝获取选定 Node(工单 #15;本阶段恒为前缀内 Node)
+    let node = node_source::resolve(&prefix);
     check(
         &mut failures,
         "Node.js",
-        platform::version_output_of(&prefix.node_exe()).map(|v| format!("{v}(前缀内)")),
+        platform::version_output_of(node.exe()).map(|v| format!("{v}(前缀内)")),
         "重跑 setup-coder install 修复 Node.js",
     );
 

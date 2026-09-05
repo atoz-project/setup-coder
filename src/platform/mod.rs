@@ -234,7 +234,11 @@ fn windows_shim_content(node_bin_dir: &Path, npm_bin_dir: &Path, bin: &str) -> S
     )
 }
 
-/// 当前平台的 shim 内容(供薄接缝落盘)
+/// 当前平台的 shim 内容(供薄接缝落盘)。
+///
+/// 契约预告(工单 #21):shim 将改为按绝对路径 exec 选定 Node
+/// (取 `node_source::resolve` 的 exe 路径),而非把 `node_bin_dir` 前置进 PATH;
+/// 届时本函数签名的 `node_bin_dir` 入参会替换为 node exe 绝对路径。
 pub fn shim_content(node_bin_dir: &Path, npm_bin_dir: &Path, bin: &str) -> String {
     if cfg!(windows) {
         windows_shim_content(node_bin_dir, npm_bin_dir, bin)
@@ -502,6 +506,7 @@ pub fn path_persistence_location() -> &'static str {
 }
 
 /// 生成 shim 到 `bin_dir`(重跑覆盖)。
+/// 契约预告(工单 #21):同 `shim_content`,`node_bin_dir` 入参将替换为选定 Node 的 exe 绝对路径。
 pub fn write_shim(
     bin_dir: &Path,
     node_bin_dir: &Path,

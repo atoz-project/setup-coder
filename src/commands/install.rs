@@ -11,13 +11,12 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::net;
+use crate::node_source::{self, NodeSource};
 use crate::platform;
 use crate::prefix::{NodeState, Prefix, State, ToolState};
 use crate::registry::{self, Tool};
 
-/// Node LTS(Krypton)。升级 = 改这一行并重测。
-/// 核实来源:npmmirror node 镜像 index.json,2026-08 时为最新 LTS。
-const NODE_VERSION: &str = "v24.19.0";
+// Node LTS 版本常量已移入解析接缝(`node_source::NODE_VERSION`)。
 
 /// Tool 安装的 npm registry(npmmirror)
 const NPM_REGISTRY: &str = "https://registry.npmmirror.com";
@@ -45,9 +44,11 @@ fn install(tool: Option<&str>) -> Result<(), Box<dyn Error>> {
     install_setup_coder_self(&prefix)?;
     write_npmrc(&prefix)?;
 
+    // 经唯一解析接缝获取选定 Node(工单 #15;本阶段恒为前缀内 Node)
+    let node = node_source::resolve(&prefix);
     let mut installed = Vec::new();
     for t in tools {
-        install_tool(&prefix, t, &mut installed)?;
+        install_tool(&prefix, &node, t, &mut installed)?;
     }
     // upsert:单装一个 Tool 不得抹掉其他 Tool 的清单记录(幂等 = 修复/升级)
     upsert_tools(&mut state.tools, &installed);
@@ -90,53 +91,55 @@ fn resolve_tools(tool: Option<&str>) -> Result<Vec<&'static Tool>, Box<dyn Error
     }
 }
 
-/// 装 Node LTS:已是指定版本则跳过(幂等),否则下载解压替换(修复/升级)
+/// 装 Node LTS:已是指定版本则跳过(幂等),否则下载解压替换(修复/升级)。
+/// 装的是前缀内 Node(接缝当前唯一来源);经接缝定位 node/ 目录与版本。
 fn ensure_node(prefix: &Prefix, state: &mut State) -> Result<(), Box<dyn Error>> {
-    if node_version_matches(prefix)? {
-        println!("Node.js {NODE_VERSION} 已就位,跳过下载");
+    let node = node_source::resolve(prefix);
+    if node_version_matches(&node)? {
+        println!("Node.js {} 已就位,跳过下载", node.version());
     } else {
         let suffix = platform::node_dist_suffix()?;
         let ext = platform::node_archive_ext();
-        println!("下载 Node.js {NODE_VERSION}({suffix})…");
+        println!("下载 Node.js {}({suffix})…", node.version());
         let archive = prefix
             .cache_dir()
-            .join(net::node_archive_name(NODE_VERSION, suffix, ext));
-        let hit = net::download_first(&net::node_urls(NODE_VERSION, suffix, ext), &archive)?;
+            .join(net::node_archive_name(node.version(), suffix, ext));
+        let hit = net::download_first(&net::node_urls(node.version(), suffix, ext), &archive)?;
         println!("已从 Mirror 下载:{hit}");
 
         // 解压到暂存目录,成功后整体替换 node/(避免半残前缀)
         let staging = prefix.cache_dir().join("node-staging");
         let _ = fs::remove_dir_all(&staging);
         platform::extract_node_archive(&archive, &staging)?;
-        let node_dir = prefix.node_dir();
-        let _ = fs::remove_dir_all(&node_dir);
-        fs::rename(&staging, &node_dir)?;
+        let node_dir = node.node_dir();
+        let _ = fs::remove_dir_all(node_dir);
+        fs::rename(&staging, node_dir)?;
 
         // 冒烟:刚解压的 node 必须能跑且版本对
-        if !node_version_matches(prefix)? {
+        if !node_version_matches(&node)? {
             return Err(format!(
-                "Node.js 解压后自检失败:期望 {NODE_VERSION},`node --version` 未通过"
+                "Node.js 解压后自检失败:期望 {},`node --version` 未通过",
+                node.version()
             )
             .into());
         }
-        println!("Node.js {NODE_VERSION} 安装完成");
+        println!("Node.js {} 安装完成", node.version());
     }
     state.node = Some(NodeState {
-        version: NODE_VERSION.to_string(),
+        version: node.version().to_string(),
     });
     Ok(())
 }
-
-/// 前缀内 node 存在且 `--version` 输出等于目标版本
-fn node_version_matches(prefix: &Prefix) -> Result<bool, Box<dyn Error>> {
-    let node = prefix.node_exe();
-    if !node.exists() {
+/// 选定 Node 存在且 `--version` 输出等于目标版本
+fn node_version_matches(node: &NodeSource) -> Result<bool, Box<dyn Error>> {
+    let exe = node.exe();
+    if !exe.exists() {
         return Ok(false);
     }
-    let Ok(out) = Command::new(&node).arg("--version").output() else {
+    let Ok(out) = Command::new(exe).arg("--version").output() else {
         return Ok(false); // 跑不起来 = 当作未装,重装修复
     };
-    Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == NODE_VERSION)
+    Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == node.version())
 }
 
 /// Prerequisite:确保 git 可用(工单 #3;平台做法收敛在 platform/)
@@ -161,25 +164,29 @@ fn write_npmrc(prefix: &Prefix) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// 给子进程准备的 PATH:前缀内 node 在最前(npm/Tool 的 #!/usr/bin/env node 依赖它)
-fn path_with_node(prefix: &Prefix) -> Result<OsString, Box<dyn Error>> {
-    let mut paths = vec![prefix.node_bin_dir()];
+/// 给子进程准备的 PATH:选定 Node 的 bin 目录在最前(npm/Tool 的 #!/usr/bin/env node 依赖它)
+fn path_with_node(node: &NodeSource) -> Result<OsString, Box<dyn Error>> {
+    let mut paths = vec![node.bin_dir().to_path_buf()];
     if let Some(existing) = std::env::var_os("PATH") {
         paths.extend(std::env::split_paths(&existing));
     }
     Ok(std::env::join_paths(paths)?)
 }
 
-/// npm 可执行入口:前缀内 node + 其自带的 npm-cli.js(布局因平台而异)
-fn npm_command(prefix: &Prefix, args: &[&str]) -> Result<Command, Box<dyn Error>> {
-    let npm_cli = prefix.node_dir().join(platform::npm_cli_subpath());
+/// npm 可执行入口:选定 Node + 其自带的 npm-cli.js(布局因平台而异)
+fn npm_command(
+    prefix: &Prefix,
+    node: &NodeSource,
+    args: &[&str],
+) -> Result<Command, Box<dyn Error>> {
+    let npm_cli = node.npm_cli();
     if !npm_cli.exists() {
         return Err(format!("前缀内 npm 不存在:{}(Node 安装不完整)", npm_cli.display()).into());
     }
-    let mut cmd = Command::new(prefix.node_exe());
+    let mut cmd = Command::new(node.exe());
     cmd.arg(npm_cli)
         .args(args)
-        .env("PATH", path_with_node(prefix)?)
+        .env("PATH", path_with_node(node)?)
         // registry/prefix/cache 全部限定在前缀内,不碰用户全局(ADR-0002)
         .env("NPM_CONFIG_REGISTRY", NPM_REGISTRY)
         .env("NPM_CONFIG_PREFIX", prefix.npm_dir())
@@ -191,18 +198,21 @@ fn npm_command(prefix: &Prefix, args: &[&str]) -> Result<Command, Box<dyn Error>
 /// 装一个 Tool:npm install -g → 生成 shim → 冒烟 --version → 返回清单记录
 fn install_tool(
     prefix: &Prefix,
+    node: &NodeSource,
     tool: &Tool,
     installed: &mut Vec<ToolState>,
 ) -> Result<(), Box<dyn Error>> {
     println!("安装 {}({})…", tool.name, tool.package);
-    let status = npm_command(prefix, &["install", "--global", tool.package])?.status()?;
+    let status = npm_command(prefix, node, &["install", "--global", tool.package])?.status()?;
     if !status.success() {
         return Err(format!("npm 安装 {} 失败(退出码 {:?})", tool.package, status.code()).into());
     }
 
+    // 工单 #21 契约变更预告:shim 将按绝对路径 exec 选定 Node,
+    // 而非把 node bin 目录前置进 PATH;届时此处传 node.exe() 而非 bin 目录
     let shim = platform::write_shim(
         &prefix.bin_dir(),
-        &prefix.node_bin_dir(),
+        node.bin_dir(),
         &prefix.npm_bin_dir(),
         tool.bin,
     )?;
