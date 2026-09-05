@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::net;
 use crate::prefix::{PathInjection, Prefix};
@@ -211,4 +212,174 @@ fn extract_zip(archive: &Path, dest_dir: &Path, strip_top: bool) -> io::Result<(
 /// Windows:zip 解压,剥掉顶层目录一层。
 pub fn extract_node_archive(archive: &Path, dest_dir: &Path) -> io::Result<()> {
     extract_zip(archive, dest_dir, true)
+}
+
+// ---------------------------------------------------------------------------
+// node 来源探测 + fnm 执行原语(工单 #18,Windows 侧)
+// ---------------------------------------------------------------------------
+
+/// fnm 默认数据目录:`%LOCALAPPDATA%\fnm`(fnm 官方安装脚本默认)。
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+fn fnm_default_dir_windows() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("fnm"))
+}
+
+/// 探测 Node 来源事实(Windows):裸 Node 走 PATH + `node --version`;
+/// nvm 走 NVM_DIR 环境变量 + `%APPDATA%\nvm`(nvm-windows);fnm 走 PATH +
+/// `%LOCALAPPDATA%\fnm` + PowerShell profile 钩子痕迹(覆盖「已装未 source」)。
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+pub fn detect_node_facts() -> crate::node_plan::NodeFacts {
+    crate::node_plan::NodeFacts {
+        bare_node: detect_bare_node_windows(),
+        nvm: detect_nvm_windows(),
+        fnm: detect_fnm_windows(),
+    }
+}
+
+/// 裸 Node:PATH 上的 `node.exe`,`--version` 解析版本。
+#[allow(dead_code)]
+fn detect_bare_node_windows() -> Option<(semver::Version, PathBuf)> {
+    let out = Command::new("where.exe").arg("node").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let first = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .to_string();
+    if first.is_empty() {
+        return None;
+    }
+    let exe = PathBuf::from(first);
+    let version = super::parse_node_version(&super::version_output_of(&exe)?)?;
+    Some((version, exe))
+}
+
+/// nvm-windows:安装痕迹 = NVM_DIR 环境变量或 `%APPDATA%\nvm` 目录;nvm 自身路径取其目录。
+#[allow(dead_code)]
+fn detect_nvm_windows() -> Option<(semver::Version, PathBuf)> {
+    let dir = std::env::var_os("NVM_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("nvm")))?;
+    if !dir.is_dir() {
+        return None;
+    }
+    // nvm-windows 无 alias/default 文件;当前版本读不到则记 0.0.0(决策只看有无 + 路径)
+    Some((semver::Version::new(0, 0, 0), dir))
+}
+
+/// fnm(Windows):优先 PATH 上的 fnm.exe,否则看默认数据目录或 PowerShell profile 钩子。
+#[allow(dead_code)]
+fn detect_fnm_windows() -> Option<(semver::Version, PathBuf)> {
+    if let Ok(out) = Command::new("where.exe").arg("fnm").output() {
+        if out.status.success() {
+            if let Some(first) = String::from_utf8_lossy(&out.stdout).lines().next() {
+                let exe = PathBuf::from(first.trim());
+                if !exe.as_os_str().is_empty() {
+                    let version =
+                        current_fnm_node_version_windows(&exe).unwrap_or(semver::Version::new(0, 0, 0));
+                    return Some((version, exe));
+                }
+            }
+        }
+    }
+    let dir = fnm_default_dir_windows()?;
+    let profile_hint = powershell_profiles()
+        .iter()
+        .filter_map(|p| fs::read_to_string(p).ok())
+        .any(|c| super::fnm_hook_present_powershell(&c));
+    if !dir.is_dir() && !profile_hint {
+        return None;
+    }
+    let exe = dir.join(super::exe_name("fnm"));
+    let version = current_fnm_node_version_windows(&exe).unwrap_or(semver::Version::new(0, 0, 0));
+    Some((version, dir))
+}
+
+/// 读 fnm 当前默认 Node 版本:`fnm list` 解析 default/最新;失败返回 None。
+#[allow(dead_code)]
+fn current_fnm_node_version_windows(fnm_exe: &Path) -> Option<semver::Version> {
+    let out = Command::new(fnm_exe).arg("list").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    super::parse_fnm_list_windows(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// 下载安装 fnm(Windows):容错链下载 fnm-windows.zip,解出单文件 fnm.exe。幂等复用。
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+pub fn install_fnm(cache_dir: &Path, dest_dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let exe = dest_dir.join(super::exe_name("fnm"));
+    if super::version_output_of(&exe).is_some() {
+        return Ok(exe); // 已装且可用:幂等复用
+    }
+    let asset = super::fnm_asset_suffix()?;
+    let archive = cache_dir.join(net::fnm_archive_name(asset));
+    let hit = net::download_first(&net::fnm_urls(asset), &archive)?;
+    println!("已从 Mirror 下载 fnm:{hit}");
+    extract_zip(&archive, dest_dir, false)?; // fnm-windows.zip 根目录即 fnm.exe,不剥层
+    if super::version_output_of(&exe).is_none() {
+        return Err("fnm 解压后自检失败:`fnm --version` 未通过".into());
+    }
+    Ok(exe)
+}
+
+/// 用 fnm 装指定 Node 版本并设为默认(Windows)。
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+pub fn fnm_install_and_default(fnm_exe: &Path, version: &str) -> Result<(), Box<dyn Error>> {
+    run_fnm_windows(fnm_exe, &["install", version])?;
+    run_fnm_windows(fnm_exe, &["default", version])
+}
+
+#[allow(dead_code)]
+fn run_fnm_windows(fnm_exe: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
+    let out = Command::new(fnm_exe).args(args).output()?;
+    if !out.status.success() {
+        return Err(format!(
+            "`fnm {}` 失败:{}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// 注入 fnm 钩子到 PowerShell profile(幂等)。返回实际改动记录。
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+pub fn inject_fnm_hook() -> io::Result<Vec<PathInjection>> {
+    let line = super::fnm_hook_line_powershell();
+    let mut injections = Vec::new();
+    for profile in powershell_profiles() {
+        let existing = match fs::read_to_string(&profile) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
+        if let Some(new) = super::shell_rc_append(&existing, &line) {
+            if let Some(parent) = profile.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&profile, new)?;
+            injections.push(PathInjection::ShellRc {
+                file: profile,
+                line: line.clone(),
+            });
+        }
+    }
+    Ok(injections)
+}
+
+/// 用户级 PowerShell profile 路径清单(`$PROFILE` 等价:`~\Documents\PowerShell\` 与
+/// 旧版 `~\Documents\WindowsPowerShell\` 的 Microsoft.PowerShell_profile.ps1)。
+#[allow(dead_code)]
+fn powershell_profiles() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(home) = std::env::home_dir() {
+        let docs = home.join("Documents");
+        out.push(docs.join("PowerShell").join("Microsoft.PowerShell_profile.ps1"));
+        out.push(docs.join("WindowsPowerShell").join("Microsoft.PowerShell_profile.ps1"));
+    }
+    out
 }

@@ -61,6 +61,34 @@ pub fn mingit_urls() -> Vec<String> {
     ]
 }
 
+/// fnm(Node 版本管理器)版本与 tag。升级 = 改这两行并重测。
+/// 核实来源:GitHub Schniz/fnm releases/latest,2026-09 时最新稳定为 v1.39.0。
+#[allow(dead_code)] // FNM_TAG 已用于 URL 链;VERSION 供执行层展示/自检,未接线(工单 #19+)
+pub const FNM_VERSION: &str = "1.39.0";
+pub const FNM_TAG: &str = "v1.39.0";
+
+/// fnm 发行资产文件名:`fnm-<asset>.zip`(`asset` 由 platform::fnm_asset_suffix_for 决定:
+/// macos 为 universal 二进制的 `macos`,linux x64 为 `linux`,linux arm64 为 `arm64`,windows 为 `windows`)
+pub fn fnm_archive_name(asset: &str) -> String {
+    format!("fnm-{asset}.zip")
+}
+
+/// fnm 下载 URL 容错链(华为云主源 + gh-proxy 加速 + GitHub Release 直连兜底)。
+///
+/// 与 Node/MinGit 链不同:npmmirror 并不镜像 fnm(`/-/binary/fnm/` 返回 NOT_FOUND,
+/// 已于 2026-09 实测),故主源改用华为云;gh-proxy.com 为 GitHub Release 加速(国内可达),
+/// GitHub 直连兜底(302 → release-assets.githubusercontent.com,ureq 默认跟随 10 次重定向)。
+/// zip 内容单一:unix 为 `fnm`,Windows 为 `fnm.exe`,无顶层包裹目录。
+pub fn fnm_urls(asset: &str) -> Vec<String> {
+    let file = fnm_archive_name(asset);
+    let github = format!("https://github.com/Schniz/fnm/releases/download/{FNM_TAG}/{file}");
+    vec![
+        format!("https://mirrors.huaweicloud.com/fnm/{FNM_TAG}/{file}"),
+        format!("https://gh-proxy.com/{github}"),
+        github,
+    ]
+}
+
 /// 建 HTTP agent:尊重代理环境变量;超时由调用方定(大文件下载给足,体检探测要短)
 fn agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
@@ -176,6 +204,31 @@ mod tests {
     fn node_urls_form_a_mirror_chain() {
         let urls = node_urls("v24.19.0", "linux-x64", "tar.gz");
         assert!(urls.len() >= 2, "必须有容错链");
+
+    #[test]
+    fn fnm_archive_name_matches_release_layout() {
+        assert_eq!(fnm_archive_name("macos"), "fnm-macos.zip");
+        assert_eq!(fnm_archive_name("windows"), "fnm-windows.zip");
+    }
+
+    #[test]
+    fn fnm_urls_form_a_mirror_chain() {
+        let urls = fnm_urls("macos");
+        assert!(urls.len() >= 3, "必须有容错链");
+        for u in &urls {
+            assert!(u.starts_with("https://"), "只允许 https:{u}");
+            assert!(u.contains(FNM_TAG), "URL 应含 tag:{u}");
+            assert!(u.ends_with(&fnm_archive_name("macos")), "URL 应含文件名:{u}");
+        }
+        // npmmirror 不镜像 fnm(实测 404),故主源为华为云
+        assert!(urls[0].contains("huaweicloud.com"), "主源应为华为云:{}", urls[0]);
+        assert!(
+            urls.iter().all(|u| !u.contains("npmmirror.com")),
+            "fnm 链不应含 npmmirror(其不镜像 fnm)"
+        );
+        // 末位为 GitHub Release 直连兜底
+        assert!(urls.last().unwrap().contains("github.com"), "兜底应为 GitHub 直连");
+    }
         for u in &urls {
             assert!(u.starts_with("https://"), "只允许 https:{u}");
             assert!(u.contains("/v24.19.0/node-v24.19.0-linux-x64.tar.gz"));

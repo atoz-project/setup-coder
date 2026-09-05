@@ -15,6 +15,30 @@ pub fn ensure_path(bin_dir: &Path) -> io::Result<Vec<PathInjection>> {
     super::ensure_path_via_shell_rc(bin_dir, RC_FILES)
 }
 
+/// 探测 Node 来源事实:与 ensure_path 同一份登录 rc 清单(覆盖「已装未 source」)
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+pub fn detect_node_facts() -> crate::node_plan::NodeFacts {
+    super::detect_node_facts_impl(RC_FILES)
+}
+
+/// 下载安装 fnm(共享 unix 实现:华为云 → gh-proxy → GitHub 容错链,解出单文件 fnm)
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+pub fn install_fnm(cache_dir: &Path, dest_dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    super::install_fnm_unix(cache_dir, dest_dir)
+}
+
+/// 用 fnm 装指定 Node 版本并设为默认(共享 unix 实现)
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+pub fn fnm_install_and_default(fnm_exe: &Path, version: &str) -> Result<(), Box<dyn Error>> {
+    super::fnm_install_and_default_unix(fnm_exe, version)
+}
+
+/// 注入 fnm 钩子到登录 rc(幂等,与 ensure_path 同一份 rc 清单)
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+pub fn inject_fnm_hook() -> io::Result<Vec<PathInjection>> {
+    super::inject_fnm_hook_via_shell_rc(RC_FILES)
+}
+
 /// doctor:PATH 持久化体检(与 ensure_path 同一份 rc 文件清单)
 pub fn path_persisted(bin_dir: &Path) -> io::Result<bool> {
     super::path_persisted_via_shell_rc(bin_dir, RC_FILES)

@@ -105,7 +105,8 @@ pub fn shell_rc_export_line(bin_dir: &Path) -> String {
 
 /// shell rc 精确回滚:删除与安装清单记录逐字匹配的行(trim 比较,防御手抖编辑),
 /// 返回删除后的完整新内容;没有匹配行 = 已回滚过,返回 None。不做模糊匹配(工单 #4)。
-#[cfg(any(unix, test))]
+/// 按行文本处理,与平台无关:unix rc 与 Windows PowerShell profile 共用(工单 #18)。
+#[cfg_attr(windows, allow(dead_code))] // Windows 的 fnm 钩子回滚随 uninstall 接线(工单 #19+)
 pub fn shell_rc_remove(existing: &str, line: &str) -> Option<String> {
     let target = line.trim();
     let mut removed = false;
@@ -130,9 +131,8 @@ pub fn shell_rc_remove(existing: &str, line: &str) -> Option<String> {
     Some(new)
 }
 
-/// shell rc 内容中是否已有该 export 行(trim 比较,与 append/remove 的幂等判断同规则)。
-/// doctor 的「PATH 已持久化」体检(工单 #9)用。
-#[cfg(any(unix, test))]
+/// shell rc 内容中是否已有该行(trim 比较,与 append/remove 的幂等判断同规则)。
+/// doctor 的「PATH 已持久化」体检(工单 #9)与 fnm 钩子幂等(工单 #18)用;平台无关。
 pub fn shell_rc_contains(existing: &str, export_line: &str) -> bool {
     existing
         .lines()
@@ -140,7 +140,7 @@ pub fn shell_rc_contains(existing: &str, export_line: &str) -> bool {
 }
 
 /// shell rc 幂等追加:内容中已有该行则返回 None,否则返回追加后的完整新内容。
-#[cfg(any(unix, test))]
+/// 平台无关:unix rc 与 Windows PowerShell profile 共用(fnm 钩子注入,工单 #18)。
 pub fn shell_rc_append(existing: &str, export_line: &str) -> Option<String> {
     if shell_rc_contains(existing, export_line) {
         return None;
@@ -412,8 +412,9 @@ pub fn wait_until(mut check: impl FnMut() -> bool, timeout: Duration, interval: 
     }
 }
 
-/// 在 PATH 目录清单中查找可执行文件(Ubuntu 检测 sudo 用)
-#[cfg(any(target_os = "linux", all(unix, test)))]
+/// 在 PATH 目录清单中查找可执行文件(Ubuntu 检测 sudo、node 来源探测找 node/fnm 用)。
+/// unix 两平台共用;Windows 走 where.exe,不用本函数。
+#[cfg(any(unix, test))]
 pub fn find_in_path(name: &str, path_var: &std::ffi::OsStr) -> Option<PathBuf> {
     std::env::split_paths(path_var).find_map(|dir| {
         let candidate = dir.join(name);
@@ -425,7 +426,7 @@ pub fn find_in_path(name: &str, path_var: &std::ffi::OsStr) -> Option<PathBuf> {
     })
 }
 
-#[cfg(any(target_os = "linux", all(unix, test)))]
+#[cfg(any(unix, test))]
 fn is_executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -559,6 +560,360 @@ pub fn git_version(prefix: &Prefix) -> Option<String> {
 /// doctor 体检时 git 不可用的指引文案(平台文案分叉收敛于此)
 pub fn git_missing_hint() -> &'static str {
     imp::git_missing_hint()
+}
+// ---------------------------------------------------------------------------
+// Prerequisite:node 来源探测 + fnm 执行原语(工单 #18)
+//
+// 探测产出 NodeFacts(裸 Node / nvm / fnm 各自的有无、版本、路径),供决策层
+// (node_plan::decide)消费;执行原语(装 fnm / fnm 装 Node / 注入 shell 钩子)
+// 落实施工。本工单只落地接缝,尚未接线到 install(工单 #19+),故死代码豁免。
+// 平台分叉(Windows 注册表 / unix rc / where.exe)收敛在 imp,命令层不见 cfg。
+// ---------------------------------------------------------------------------
+
+/// 探测机器上的 Node 来源事实,供 node_plan::decide 决策(分派 imp)。
+///
+/// 必须能识别「已装但未在当前 shell 生效」的安装(读安装痕迹与版本,而非仅看
+/// 当前 PATH):nvm 走默认目录 + rc 行,fnm 走数据目录 + 可执行文件。
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+pub fn detect_node_facts() -> crate::node_plan::NodeFacts {
+    imp::detect_node_facts()
+}
+
+/// 下载并安装 fnm 到 `dest_dir`,返回 fnm 可执行文件路径(分派 imp)。
+/// 经 net::fnm_urls 镜像容错链下载;幂等:目标已装且可用则直接复用。
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+pub fn install_fnm(cache_dir: &Path, dest_dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    imp::install_fnm(cache_dir, dest_dir)
+}
+
+/// 用给定 fnm 装指定 Node 版本并设为默认:`fnm install <version>` + `fnm default <version>`。
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+pub fn fnm_install_and_default(fnm_exe: &Path, version: &str) -> Result<(), Box<dyn Error>> {
+    imp::fnm_install_and_default(fnm_exe, version)
+}
+
+/// 把 fnm 的 shell 钩子幂等注入用户 shell 配置文件(unix:各登录 rc;Windows:PowerShell
+/// profile)。重跑不产生重复行。unix 返回实际改动的注入记录(供 state.json 精确回滚)。
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+pub fn inject_fnm_hook() -> io::Result<Vec<PathInjection>> {
+    imp::inject_fnm_hook()
+}
+
+/// 当前平台的 fnm 发行资产后缀(fnm-<suffix>.zip)
+#[allow(dead_code)] // 未接线到 install(工单 #19+)
+pub fn fnm_asset_suffix() -> Result<&'static str, String> {
+    fnm_asset_suffix_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+// ---------------------------------------------------------------------------
+// node 探测纯逻辑(全平台可编译,单测覆盖)
+// ---------------------------------------------------------------------------
+
+/// 从 `node --version` 输出解析版本(如 "v24.19.0" / "24.19.0");无法解析返回 None。
+pub fn parse_node_version(out: &str) -> Option<semver::Version> {
+    parse_semver_like(out.trim())
+}
+
+/// 从 `fnm --version` 输出解析版本(如 "fnm 1.39.0" / "1.39.0");无法解析返回 None。
+#[allow(dead_code)] // fnm 版本串解析,供 doctor/执行层自检,未接线(工单 #19+)
+pub fn parse_fnm_version(out: &str) -> Option<semver::Version> {
+    parse_semver_like(out.trim())
+}
+
+/// 从 `fnm list` 输出解析「当前默认」的 Node 版本(用于确定 nvm/fnm 管理的当前 Node)。
+///
+/// fnm list 形如(`* system` 为指向系统裸 Node 的别名,不算 fnm 自己装的版本):
+/// ```text
+/// * v20.19.0
+/// * v22.19.0 default
+/// * system
+/// ```
+/// 策略:优先取带 `default` 标记的行;否则取最后一行非 system 的版本(fnm 装新版本追加在尾)。
+fn parse_fnm_list(out: &str) -> Option<semver::Version> {
+    let mut marked = None;
+    let mut last = None;
+    for line in out.lines() {
+        let trimmed = line.trim().trim_start_matches('*').trim();
+        let first = trimmed.split_whitespace().next()?;
+        if first == "system" {
+            continue;
+        }
+        let Some(ver) = parse_semver_like(first) else {
+            continue;
+        };
+        last = Some(ver.clone());
+        if trimmed.contains("default") {
+            marked = Some(ver);
+        }
+    }
+    marked.or(last)
+}
+
+/// 宽松 semver 解析:剥掉前导 `v` 与首个单词标签(如 "fnm"),容忍缺 minor/patch
+/// (`22` → `22.0.0`,`22.19` → `22.19.0`)。无法解析返回 None。
+fn parse_semver_like(raw: &str) -> Option<semver::Version> {
+    let s = raw.trim().trim_start_matches(['v', 'V']).trim();
+    // `fnm --version` 输出 "fnm 1.39.0":取最后一个含数字的 token,容忍工具名前缀
+    let token = s
+        .split_whitespace()
+        .filter(|t| t.chars().any(|c| c.is_ascii_digit()))
+        .last()?;
+    let mut it = token.split('.');
+    let major: u64 = it.next()?.parse().ok()?;
+    let minor: u64 = it.next().unwrap_or("0").parse().ok()?;
+    let patch: u64 = it.next().unwrap_or("0").parse().ok()?;
+    Some(semver::Version::new(major, minor, patch))
+}
+
+/// nvm 默认安装目录:`$NVM_DIR` 未设时为 `<home>/.nvm`(unix;Windows 走 nvm-windows 布局)。
+#[cfg_attr(windows, allow(dead_code))] // unix 探测专用;Windows nvm 走 %APPDATA%\nvm(工单 #18)
+pub fn nvm_default_dir(home: &Path) -> PathBuf {
+    home.join(".nvm")
+}
+
+/// nvm 的 shell rc 痕迹:rc 内容中是否 export 了 NVM_DIR(安装脚本的标志行)。
+/// 据此识别「已装但未在当前会话 source」的 nvm(不依赖进程 PATH)。
+#[cfg_attr(windows, allow(dead_code))] // unix 探测专用;Windows nvm 走 %APPDATA%\nvm(工单 #18)
+pub fn nvm_rc_present(rc_content: &str) -> bool {
+    rc_content
+        .lines()
+        .map(str::trim)
+        .any(|l| l.contains("NVM_DIR") && (l.starts_with("export ") || l.contains("export NVM_DIR")))
+}
+
+/// nvm 当前 Node 版本:`<nvm_dir>/alias/default` 文件内容(安装脚本维护);
+/// 返回解析到的版本串(供后续在该 nvm_dir 下定位 `versions/node/vX.Y.Z`)。
+#[cfg_attr(windows, allow(dead_code))] // unix 探测专用;Windows nvm 无 alias 文件(工单 #18)
+pub fn nvm_default_version(nvm_dir: &Path) -> Option<String> {
+    let alias = fs::read_to_string(nvm_dir.join("alias").join("default")).ok()?;
+    let v = alias.trim().trim_start_matches('v').to_string();
+    if v.is_empty() { None } else { Some(v) }
+}
+
+/// fnm 默认安装/数据目录(unix 为 `~/.local/share/fnm`;Windows 由 imp 覆盖为
+/// `%LOCALAPPDATA%\fnm`)。nvm/fnm 探测与 install_fnm 的落盘目录共用此定义。
+#[cfg(unix)]
+pub fn fnm_default_dir(home: &Path) -> PathBuf {
+    home.join(".local").join("share").join("fnm")
+}
+
+/// fnm 的 unix shell rc 钩子行(写入登录 rc,幂等判断以这行为准)。
+/// `--use-on-cd` 是官方安装脚本默认注入的常用旗标。
+#[cfg(any(unix, test))]
+pub fn fnm_hook_line() -> String {
+    "eval \"$(fnm env --use-on-cd)\"  # setup-coder fnm".to_string()
+}
+
+/// rc 内容中是否已有 fnm 钩子(任一 fnm env 初始化行;trim 比较)。
+/// 与 fnm_hook_line 注入、以及「已装但未 source」探测共用同一判定。
+#[cfg(any(unix, test))]
+pub fn fnm_hook_present(rc_content: &str) -> bool {
+    rc_content
+        .lines()
+        .map(str::trim)
+        .any(|l| l.starts_with("eval") && l.contains("fnm env"))
+}
+
+/// fnm 发行资产后缀:`fnm-<suffix>.zip`。
+/// 实测 Schniz/fnm v1.39.0:macos 为 x64+arm64 universal 单资产;linux x64 为 `linux`,
+/// linux arm64 为 `arm64`;windows 为 `windows`(均单文件 zip,无顶层目录)。
+pub fn fnm_asset_suffix_for(os: &str, arch: &str) -> Result<&'static str, String> {
+    match (os, arch) {
+        ("macos", _) => Ok("macos"), // universal:单资产覆盖 x64 与 arm64
+        ("linux", "x86_64") => Ok("linux"),
+        ("linux", "aarch64") => Ok("arm64"),
+        ("windows", "x86_64") => Ok("windows"),
+        _ => Err(format!("暂不支持的平台组合(fnm):{os}/{arch}")),
+    }
+}
+
+/// fnm 的 PowerShell profile 钩子行(Windows;写入用户 profile,幂等判断以这行为准)。
+#[cfg(any(windows, test))]
+pub fn fnm_hook_line_powershell() -> String {
+    "fnm env --use-on-cd | Out-String | Invoke-Expression  # setup-coder fnm".to_string()
+}
+
+/// PowerShell profile 内容中是否已有 fnm 钩子(任一 fnm env 初始化行;trim 比较)。
+#[cfg(any(windows, test))]
+pub fn fnm_hook_present_powershell(profile_content: &str) -> bool {
+    profile_content
+        .lines()
+        .map(str::trim)
+        .any(|l| l.contains("fnm env") && l.contains("Invoke-Expression"))
+}
+
+/// Windows 侧 `fnm list` 解析:与 unix 同一规则(默认标记优先,否则最后非 system 版本)。
+/// 单列出来仅为平台对称与单测;逻辑与 parse_fnm_list 相同。
+#[cfg(any(windows, test))]
+pub fn parse_fnm_list_windows(out: &str) -> Option<semver::Version> {
+    parse_fnm_list(out)
+}
+
+// ---------------------------------------------------------------------------
+// unix 共享 node 薄接缝(macos.rs / linux.rs 复用;平台差异只在 rc 文件清单)
+// ---------------------------------------------------------------------------
+
+/// unix 共享探测:裸 Node + nvm(默认目录 + rc 痕迹)+ fnm(数据目录 + 可执行)。
+/// 不依赖当前 PATH:nvm/fnm 读安装痕迹(`~/.nvm`、`~/.local/share/fnm`、各登录 rc)。
+#[cfg(unix)]
+pub(super) fn detect_node_facts_impl(rc_file_names: &[&str]) -> crate::node_plan::NodeFacts {
+    let home = std::env::home_dir();
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    let rc_contents: Vec<String> = home
+        .iter()
+        .flat_map(|h| rc_file_names.iter().map(move |n| h.join(n)))
+        .filter_map(|f| fs::read_to_string(f).ok())
+        .collect();
+    crate::node_plan::NodeFacts {
+        bare_node: detect_bare_node_unix(&path_var),
+        nvm: home.as_deref().and_then(|h| detect_nvm_unix(h, &rc_contents)),
+        fnm: home.as_deref().and_then(|h| detect_fnm_unix(h, &rc_contents, &path_var)),
+    }
+}
+
+/// 裸 Node:在 PATH 上找 node,`--version` 解析版本。找不到 = 无裸 Node。
+#[cfg(unix)]
+fn detect_bare_node_unix(path_var: &std::ffi::OsStr) -> Option<(semver::Version, PathBuf)> {
+    let exe = find_in_path("node", path_var)?;
+    let version = parse_node_version(&version_output_of(&exe)?)?;
+    Some((version, exe))
+}
+
+/// nvm:安装痕迹 = 默认目录存在且 rc 里有 NVM_DIR 行(覆盖「已装未 source」)。
+/// 当前 Node 版本取 `<nvm_dir>/alias/default`;nvm 自身路径取其目录。
+#[cfg(unix)]
+fn detect_nvm_unix(home: &Path, rc_contents: &[String]) -> Option<(semver::Version, PathBuf)> {
+    let nvm_dir = nvm_default_dir(home);
+    let dir_exists = nvm_dir.is_dir();
+    let rc_hint = rc_contents.iter().any(|c| nvm_rc_present(c));
+    if !dir_exists && !rc_hint {
+        return None;
+    }
+    let version = nvm_default_version(&nvm_dir)
+        .and_then(|v| parse_node_version(&format!("v{v}")))
+        .unwrap_or(semver::Version::new(0, 0, 0));
+    Some((version, nvm_dir))
+}
+
+/// fnm:优先 PATH 上的可执行(实际可用),否则看默认数据目录或 rc 钩子(覆盖
+/// 「已装未 source」)。当前默认 Node 版本经 `fnm list` 读取;读不到记 0.0.0。
+#[cfg(unix)]
+fn detect_fnm_unix(
+    home: &Path,
+    rc_contents: &[String],
+    path_var: &std::ffi::OsStr,
+) -> Option<(semver::Version, PathBuf)> {
+    if let Some(exe) = find_in_path("fnm", path_var) {
+        let version = current_fnm_node_version(&exe).unwrap_or(semver::Version::new(0, 0, 0));
+        return Some((version, exe));
+    }
+    let dir = fnm_default_dir(home);
+    let rc_hint = rc_contents.iter().any(|c| fnm_hook_present(c));
+    if !dir.is_dir() && !rc_hint {
+        return None;
+    }
+    let exe = dir.join(exe_name("fnm"));
+    let version = current_fnm_node_version(&exe).unwrap_or(semver::Version::new(0, 0, 0));
+    Some((version, dir))
+}
+
+/// 读 fnm 当前默认 Node 版本:`fnm list` 解析 default/最新;失败返回 None。
+#[cfg(unix)]
+fn current_fnm_node_version(fnm_exe: &Path) -> Option<semver::Version> {
+    let out = Command::new(fnm_exe).arg("list").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_fnm_list(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// unix 共享:向一组登录 rc 幂等追加 fnm 钩子行。文件不存在则创建。
+/// 返回实际发生的注入记录(复用 shell_rc_append 幂等,重跑不重复)。
+#[cfg(unix)]
+pub(super) fn inject_fnm_hook_via_shell_rc(
+    rc_file_names: &[&str],
+) -> io::Result<Vec<PathInjection>> {
+    let home = std::env::home_dir().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "无法确定用户家目录(HOME 未设置)")
+    })?;
+    let line = fnm_hook_line();
+    let mut injections = Vec::new();
+    for name in rc_file_names {
+        let file = home.join(name);
+        let existing = match fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
+        if let Some(new) = shell_rc_append(&existing, &line) {
+            fs::write(&file, new)?;
+            injections.push(PathInjection::ShellRc {
+                file,
+                line: line.clone(),
+            });
+        }
+    }
+    Ok(injections)
+}
+
+/// unix 共享:下载 fnm zip 并解出单文件 `fnm` 到 dest_dir,置可执行位。幂等:
+/// 目标 fnm 已能跑则直接复用。返回 fnm 可执行文件路径。
+#[cfg(unix)]
+pub(super) fn install_fnm_unix(
+    cache_dir: &Path,
+    dest_dir: &Path,
+) -> Result<PathBuf, Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let exe = dest_dir.join(exe_name("fnm"));
+    if version_output_of(&exe).is_some() {
+        return Ok(exe); // 已装且可用:幂等复用
+    }
+    let asset = fnm_asset_suffix()?;
+    let archive = cache_dir.join(crate::net::fnm_archive_name(asset));
+    let hit = crate::net::download_first(&crate::net::fnm_urls(asset), &archive)?;
+    println!("已从 Mirror 下载 fnm:{hit}");
+
+    fs::create_dir_all(dest_dir)?;
+    let bytes = fs::read(&archive)?;
+    let cursor = io::Cursor::new(bytes);
+    let mut zip = zip::ZipArchive::new(cursor)
+        .map_err(|e| format!("fnm zip 损坏:{e}"))?;
+    let mut entry = zip
+        .by_name("fnm")
+        .map_err(|e| format!("fnm zip 中无 `fnm` 条目:{e}"))?;
+    let mut out = fs::File::create(&exe)?;
+    io::copy(&mut entry, &mut out)?;
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755))?;
+    if version_output_of(&exe).is_none() {
+        return Err("fnm 解压后自检失败:`fnm --version` 未通过".into());
+    }
+    Ok(exe)
+}
+
+/// unix 共享:跑一条 fnm 子命令,按绝对路径调可执行(不依赖 PATH);非零退出带 stderr 报错。
+#[cfg(unix)]
+pub(super) fn run_fnm(fnm_exe: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
+    let out = Command::new(fnm_exe).args(args).output()?;
+    if !out.status.success() {
+        return Err(format!(
+            "`fnm {}` 失败:{}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// unix 共享:`fnm install <version>` + `fnm default <version>`。
+#[cfg(unix)]
+pub(super) fn fnm_install_and_default_unix(
+    fnm_exe: &Path,
+    version: &str,
+) -> Result<(), Box<dyn Error>> {
+    run_fnm(fnm_exe, &["install", version])?;
+    run_fnm(fnm_exe, &["default", version])
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,5 +1383,150 @@ mod tests {
         assert!(GIT_POLL_INTERVAL < GIT_WAIT_TIMEOUT, "轮询间隔必须小于超时");
         assert!(clt_prompt_message().contains("xcode-select --install"));
         assert!(clt_wait_timeout_error().contains("xcode-select --install"));
+    }
+
+    // -------------------------------------------------------------------
+    // node 来源探测纯逻辑(工单 #18)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_node_version_accepts_v_prefixed_and_bare() {
+        assert_eq!(
+            parse_node_version("v24.19.0").unwrap(),
+            semver::Version::new(24, 19, 0)
+        );
+        assert_eq!(
+            parse_node_version("24.19.0").unwrap(),
+            semver::Version::new(24, 19, 0)
+        );
+        assert_eq!(
+            parse_node_version("  v22.19.0\n").unwrap(),
+            semver::Version::new(22, 19, 0)
+        );
+        assert!(parse_node_version("").is_none());
+        assert!(parse_node_version("not a version").is_none());
+    }
+
+    #[test]
+    fn parse_fnm_version_strips_tool_name_prefix() {
+        assert_eq!(
+            parse_fnm_version("fnm 1.39.0").unwrap(),
+            semver::Version::new(1, 39, 0)
+        );
+        assert_eq!(
+            parse_fnm_version("1.39.0").unwrap(),
+            semver::Version::new(1, 39, 0)
+        );
+        assert!(parse_fnm_version("fnm").is_none());
+    }
+
+    #[test]
+    fn parse_fnm_list_prefers_default_marker_then_latest() {
+        // 带 default 标记的行优先
+        let out = "* v20.19.0\n* v22.19.0 default\n* system\n";
+        assert_eq!(
+            parse_fnm_list(out).unwrap(),
+            semver::Version::new(22, 19, 0)
+        );
+        // 无 default 标记时取最后一行非 system 版本
+        let out = "* v20.19.0\n* v22.19.0\n* system\n";
+        assert_eq!(
+            parse_fnm_list(out).unwrap(),
+            semver::Version::new(22, 19, 0)
+        );
+        // 只有 system(指向裸 Node)→ fnm 未自装任何版本
+        assert!(parse_fnm_list("* system\n").is_none());
+        assert!(parse_fnm_list("").is_none());
+    }
+
+    #[test]
+    fn parse_semver_like_tolerates_missing_minor_patch() {
+        assert_eq!(parse_semver_like("22").unwrap(), semver::Version::new(22, 0, 0));
+        assert_eq!(
+            parse_semver_like("22.19").unwrap(),
+            semver::Version::new(22, 19, 0)
+        );
+        assert!(parse_semver_like("v").is_none());
+    }
+
+    #[test]
+    fn nvm_default_dir_is_under_home() {
+        assert_eq!(
+            nvm_default_dir(Path::new("/home/u")),
+            Path::new("/home/u/.nvm")
+        );
+    }
+
+    #[test]
+    fn nvm_rc_present_detects_install_trace_not_path() {
+        // 安装脚本的标志行(覆盖「已装未在当前会话 source」)
+        let rc = "export NVM_DIR=\"$HOME/.nvm\"\n[ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"\n";
+        assert!(nvm_rc_present(rc));
+        // 无 NVM_DIR → 无痕迹
+        assert!(!nvm_rc_present("export PATH=\"$HOME/bin:$PATH\"\n"));
+        assert!(!nvm_rc_present(""));
+    }
+
+    #[test]
+    fn nvm_default_version_reads_alias_file() {
+        let dir = std::env::temp_dir().join(format!("setup-coder-test-nvm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("alias")).unwrap();
+        fs::write(dir.join("alias").join("default"), "v22.19.0\n").unwrap();
+        assert_eq!(nvm_default_version(&dir).as_deref(), Some("22.19.0"));
+        // 无 alias/default → None
+        let empty = dir.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        assert!(nvm_default_version(&empty).is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn fnm_hook_line_is_unix_eval_form() {
+        let line = fnm_hook_line();
+        assert!(line.starts_with("eval"), "应为 eval 钩子:{line}");
+        assert!(line.contains("fnm env"), "应初始化 fnm env:{line}");
+    }
+
+    #[test]
+    fn fnm_hook_present_matches_any_fnm_env_line() {
+        assert!(fnm_hook_present(&fnm_hook_line()));
+        assert!(fnm_hook_present("eval \"$(fnm env --use-on-cd)\"\n"));
+        assert!(fnm_hook_present("  eval \"$(fnm env)\"  \n"));
+        assert!(!fnm_hook_present("export PATH=\"$HOME/.fnm:$PATH\"\n"));
+        assert!(!fnm_hook_present(""));
+    }
+
+    #[test]
+    fn inject_fnm_hook_is_idempotent_via_rc_append() {
+        // 幂等:重跑同一行不产生重复(复用 shell_rc_append/contains 接缝)
+        let line = fnm_hook_line();
+        let once = shell_rc_append("# existing\n", &line).unwrap();
+        assert!(shell_rc_contains(&once, &line));
+        let count = once.matches("fnm env").count();
+        assert_eq!(count, 1, "首次注入恰好一行");
+        // 重跑 → None(不追加),内容不变
+        assert!(shell_rc_append(&once, &line).is_none(), "重跑不得重复注入");
+        assert_eq!(once.matches("fnm env").count(), 1);
+    }
+
+    #[test]
+    fn fnm_asset_suffix_covers_ci_targets() {
+        assert_eq!(fnm_asset_suffix_for("macos", "aarch64").unwrap(), "macos");
+        assert_eq!(fnm_asset_suffix_for("macos", "x86_64").unwrap(), "macos");
+        assert_eq!(fnm_asset_suffix_for("linux", "x86_64").unwrap(), "linux");
+        assert_eq!(fnm_asset_suffix_for("linux", "aarch64").unwrap(), "arm64");
+        assert_eq!(fnm_asset_suffix_for("windows", "x86_64").unwrap(), "windows");
+        assert!(fnm_asset_suffix_for("linux", "riscv64").is_err());
+        assert!(fnm_asset_suffix_for("freebsd", "x86_64").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fnm_default_dir_is_under_home() {
+        assert_eq!(
+            fnm_default_dir(Path::new("/home/u")),
+            Path::new("/home/u/.local/share/fnm")
+        );
     }
 }
