@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use semver::Version;
 
-use crate::registry::{Tool, floor_for_tools};
+use crate::registry::{floor_for_tools, Tool};
 
 /// 探测到的机器事实(IO 由调用方完成,本类型只承载结果)。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,7 +155,14 @@ mod tests {
                 (22, 19, 0),
             ),
             // 6. 单工具下限低(仅 codex,>=16)→ 复用全集会拒绝的旧 Node 18
-            ("reuse_bare", Some((18, 19, 0)), None, None, &["codex"], (16, 0, 0)),
+            (
+                "reuse_bare",
+                Some((18, 19, 0)),
+                None,
+                None,
+                &["codex"],
+                (16, 0, 0),
+            ),
             // 7. 无裸 Node 但有 nvm → UseNvm(不依赖裸 Node 分支)
             (
                 "use_nvm",
@@ -209,7 +216,10 @@ mod tests {
     fn nvm_wins_over_fnm_when_bare_noncompliant() {
         // 裸 Node 不达标时 nvm 优先于 fnm(CONTEXT.md:Prerequisite 优先级)
         let tools: Vec<&Tool> = crate::registry::all().iter().collect();
-        let plan = decide(&facts(Some((20, 0, 0)), Some((20, 0, 0)), Some((20, 0, 0))), &tools);
+        let plan = decide(
+            &facts(Some((20, 0, 0)), Some((20, 0, 0)), Some((20, 0, 0))),
+            &tools,
+        );
         assert!(matches!(plan, NodePlan::UseNvm { .. }));
     }
 }

@@ -88,22 +88,37 @@ pub fn rollback_injection(injection: &PathInjection) -> io::Result<bool> {
     use winreg::enums::*;
     use winreg::RegKey;
 
-    let PathInjection::WindowsUserPath { dir } = injection else {
+    match injection {
+        PathInjection::WindowsUserPath { dir } => {
+            let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+            let (env, _) = hkcu.create_subkey("Environment")?;
+            let Some(raw) = env.get_raw_value("Path").ok() else {
+                return Ok(false);
+            };
+            let existing = raw.to_string();
+            let dir = dir.to_string_lossy();
+            let Some(merged) = super::windows_path_remove(&existing, &dir) else {
+                return Ok(false); // 已回滚过,幂等无副作用
+            };
+            set_user_path(&env, &merged, Some(&raw))?;
+            Ok(true)
+        }
+        // fnm 钩子与 unix rc 行同为精确行注入,回滚语义逐字一致(工单 #17/#22)
+        PathInjection::FnmHook { file, line } => {
+            let existing = match fs::read_to_string(file) {
+                Ok(text) => text,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(e),
+            };
+            let Some(new) = super::shell_rc_remove(&existing, line) else {
+                return Ok(false); // 已回滚过,幂等无副作用
+            };
+            fs::write(file, new)?;
+            Ok(true)
+        }
         // unix 注入类型不会出现在本平台的安装清单里
-        return Ok(false);
-    };
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (env, _) = hkcu.create_subkey("Environment")?;
-    let Some(raw) = env.get_raw_value("Path").ok() else {
-        return Ok(false);
-    };
-    let existing = raw.to_string();
-    let dir = dir.to_string_lossy();
-    let Some(merged) = super::windows_path_remove(&existing, &dir) else {
-        return Ok(false); // 已回滚过,幂等无副作用
-    };
-    set_user_path(&env, &merged, Some(&raw))?;
-    Ok(true)
+        PathInjection::ShellRc { .. } => Ok(false),
+    }
 }
 
 /// git 版本:先看系统 PATH(用户自装,doctor 只报告),再退回前缀内 MinGit
@@ -209,20 +224,9 @@ fn extract_zip(archive: &Path, dest_dir: &Path, strip_top: bool) -> io::Result<(
     Ok(())
 }
 
-/// Windows:zip 解压,剥掉顶层目录一层。
-pub fn extract_node_archive(archive: &Path, dest_dir: &Path) -> io::Result<()> {
-    extract_zip(archive, dest_dir, true)
-}
-
 // ---------------------------------------------------------------------------
 // node 来源探测 + fnm 执行原语(工单 #18,Windows 侧)
 // ---------------------------------------------------------------------------
-
-/// fnm 默认数据目录:`%LOCALAPPDATA%\fnm`(fnm 官方安装脚本默认)。
-#[allow(dead_code)] // 未接线到 install(工单 #19+)
-fn fnm_default_dir_windows() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("fnm"))
-}
 
 /// 探测 Node 来源事实(Windows):裸 Node 走 PATH + `node --version`;
 /// nvm 走 NVM_DIR 环境变量 + `%APPDATA%\nvm`(nvm-windows);fnm 走 PATH +
@@ -236,8 +240,12 @@ pub fn detect_node_facts() -> crate::node_plan::NodeFacts {
     }
 }
 
+/// fnm 默认数据目录:`%LOCALAPPDATA%\fnm`(fnm 官方安装脚本默认)。
+fn fnm_default_dir_windows() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("fnm"))
+}
+
 /// 裸 Node:PATH 上的 `node.exe`,`--version` 解析版本。
-#[allow(dead_code)]
 fn detect_bare_node_windows() -> Option<(semver::Version, PathBuf)> {
     let out = Command::new("where.exe").arg("node").output().ok()?;
     if !out.status.success() {
@@ -257,7 +265,6 @@ fn detect_bare_node_windows() -> Option<(semver::Version, PathBuf)> {
 }
 
 /// nvm-windows:安装痕迹 = NVM_DIR 环境变量或 `%APPDATA%\nvm` 目录;nvm 自身路径取其目录。
-#[allow(dead_code)]
 fn detect_nvm_windows() -> Option<(semver::Version, PathBuf)> {
     let dir = std::env::var_os("NVM_DIR")
         .map(PathBuf::from)
@@ -270,15 +277,14 @@ fn detect_nvm_windows() -> Option<(semver::Version, PathBuf)> {
 }
 
 /// fnm(Windows):优先 PATH 上的 fnm.exe,否则看默认数据目录或 PowerShell profile 钩子。
-#[allow(dead_code)]
 fn detect_fnm_windows() -> Option<(semver::Version, PathBuf)> {
     if let Ok(out) = Command::new("where.exe").arg("fnm").output() {
         if out.status.success() {
             if let Some(first) = String::from_utf8_lossy(&out.stdout).lines().next() {
                 let exe = PathBuf::from(first.trim());
                 if !exe.as_os_str().is_empty() {
-                    let version =
-                        current_fnm_node_version_windows(&exe).unwrap_or(semver::Version::new(0, 0, 0));
+                    let version = current_fnm_node_version_windows(&exe)
+                        .unwrap_or(semver::Version::new(0, 0, 0));
                     return Some((version, exe));
                 }
             }
@@ -297,8 +303,14 @@ fn detect_fnm_windows() -> Option<(semver::Version, PathBuf)> {
     Some((version, dir))
 }
 
+/// fnm 默认安装/数据目录(Windows 平台定义,与 unix 的 `~/.local/share/fnm` 同位):
+/// `%LOCALAPPDATA%\fnm`(fnm 官方安装脚本默认)。node_source 的 InstallFnm 解析接缝
+/// 与探测、install_fnm 落盘共用此目录。LOCALAPPDATA 缺失时回退 `<home>/.fnm`。
+pub fn fnm_default_dir(home: &Path) -> PathBuf {
+    fnm_default_dir_windows().unwrap_or_else(|| home.join(".fnm"))
+}
+
 /// 读 fnm 当前默认 Node 版本:`fnm list` 解析 default/最新;失败返回 None。
-#[allow(dead_code)]
 fn current_fnm_node_version_windows(fnm_exe: &Path) -> Option<semver::Version> {
     let out = Command::new(fnm_exe).arg("list").output().ok()?;
     if !out.status.success() {
@@ -308,7 +320,6 @@ fn current_fnm_node_version_windows(fnm_exe: &Path) -> Option<semver::Version> {
 }
 
 /// 下载安装 fnm(Windows):容错链下载 fnm-windows.zip,解出单文件 fnm.exe。幂等复用。
-#[allow(dead_code)] // 未接线到 install(工单 #19+)
 pub fn install_fnm(cache_dir: &Path, dest_dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
     let exe = dest_dir.join(super::exe_name("fnm"));
     if super::version_output_of(&exe).is_some() {
@@ -335,10 +346,7 @@ pub fn fnm_install_and_default(fnm_exe: &Path, version: &str) -> Result<(), Box<
 ///
 /// nvm-windows 是 `nvm.exe` 二进制(与 unix 的 shell 函数不同),直接按绝对路径调用。
 /// 只装、只解析,不 `nvm use`(不劫持用户当前切换);版本目录布局 NVM_HOME/vX.Y.Z/。
-pub fn nvm_install_and_resolve(
-    nvm_dir: &Path,
-    version: &str,
-) -> Result<PathBuf, Box<dyn Error>> {
+pub fn nvm_install_and_resolve(nvm_dir: &Path, version: &str) -> Result<PathBuf, Box<dyn Error>> {
     let exe = nvm_dir.join(super::exe_name("nvm"));
     let out = Command::new(&exe).args(["install", version]).output()?;
     if !out.status.success() {
@@ -350,8 +358,15 @@ pub fn nvm_install_and_resolve(
         )
         .into());
     }
-    Ok(super::resolve_manager_node(nvm_dir, version, super::ManagerKind::Nvm)
-        .unwrap_or_else(|| nvm_dir.join(format!("v{version}")).join(super::exe_name("node"))))
+    Ok(
+        super::resolve_manager_node(nvm_dir, version, super::ManagerKind::Nvm).unwrap_or_else(
+            || {
+                nvm_dir
+                    .join(format!("v{version}"))
+                    .join(super::exe_name("node"))
+            },
+        ),
+    )
 }
 
 fn run_fnm_windows(fnm_exe: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
@@ -367,8 +382,7 @@ fn run_fnm_windows(fnm_exe: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-/// 注入 fnm 钩子到 PowerShell profile(幂等)。返回实际改动记录。
-#[allow(dead_code)] // 未接线到 install(工单 #19+)
+/// 注入 fnm 钩子到 PowerShell profile(幂等)。返回实际改动的 FnmHook 记录。
 pub fn inject_fnm_hook() -> io::Result<Vec<PathInjection>> {
     let line = super::fnm_hook_line_powershell();
     let mut injections = Vec::new();
@@ -383,7 +397,7 @@ pub fn inject_fnm_hook() -> io::Result<Vec<PathInjection>> {
                 fs::create_dir_all(parent)?;
             }
             fs::write(&profile, new)?;
-            injections.push(PathInjection::ShellRc {
+            injections.push(PathInjection::FnmHook {
                 file: profile,
                 line: line.clone(),
             });
@@ -394,13 +408,18 @@ pub fn inject_fnm_hook() -> io::Result<Vec<PathInjection>> {
 
 /// 用户级 PowerShell profile 路径清单(`$PROFILE` 等价:`~\Documents\PowerShell\` 与
 /// 旧版 `~\Documents\WindowsPowerShell\` 的 Microsoft.PowerShell_profile.ps1)。
-#[allow(dead_code)]
 fn powershell_profiles() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(home) = std::env::home_dir() {
         let docs = home.join("Documents");
-        out.push(docs.join("PowerShell").join("Microsoft.PowerShell_profile.ps1"));
-        out.push(docs.join("WindowsPowerShell").join("Microsoft.PowerShell_profile.ps1"));
+        out.push(
+            docs.join("PowerShell")
+                .join("Microsoft.PowerShell_profile.ps1"),
+        );
+        out.push(
+            docs.join("WindowsPowerShell")
+                .join("Microsoft.PowerShell_profile.ps1"),
+        );
     }
     out
 }

@@ -57,22 +57,22 @@ fn doctor() -> i32 {
         }
     };
 
-    // 经唯一解析接缝获取选定 Node:按 v2 清单落账解析(复用 = 用户机器上的绝对路径)
-    let node = node_source::from_state(
-        &prefix,
-        &state.clone().unwrap_or_default(),
-    );
-    let source_label = match node.kind() {
+    // 经唯一解析接缝获取选定 Node:按 v2 清单落账解析(复用 = 用户机器上的绝对路径);
+    // 清单无 Node 记录/缺 exe(尚未完成安装)→ 体检直接报缺,不存在前缀保底 Node
+    let node = node_source::from_state(&state.clone().unwrap_or_default());
+    let source_label = node.as_ref().map(|n| match n.kind() {
         crate::prefix::NodeSourceKind::UserBare => "复用用户裸 Node",
         crate::prefix::NodeSourceKind::UserNvm => "经 nvm",
         crate::prefix::NodeSourceKind::UserFnm => "经 fnm",
-    };
+    });
     check(
         &mut failures,
         "Node.js",
-        platform::version_output_of(node.exe())
-            .map(|v| format!("{v}({source_label},{})", node.exe().display())),
-        "重跑 setup-coder install 修复 Node.js",
+        node.and_then(|n| {
+            platform::version_output_of(n.exe())
+                .map(|v| format!("{v}({},{})", source_label.unwrap_or(""), n.exe().display()))
+        }),
+        "重跑 setup-coder install 安装/修复 Node.js",
     );
 
     check(
@@ -130,7 +130,9 @@ fn doctor() -> i32 {
         }
         Err(e) => {
             println!("✗ PATH 持久化状态读取失败:{e}");
-            println!("  → 下一步:重跑 setup-coder install 修复;若反复失败请到 GitHub 提 issue 反馈");
+            println!(
+                "  → 下一步:重跑 setup-coder install 修复;若反复失败请到 GitHub 提 issue 反馈"
+            );
             failures += 1;
             None
         }

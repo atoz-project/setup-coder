@@ -1,25 +1,22 @@
 //! `install` 子命令:选定 Node(决策)→ 装 Tool 进 Private Prefix,零输入完成。
 //!
 //! 流水线:建前缀骨架 → 探测 Node 事实 → 纯决策 → 按方案执行
-//! (达标裸 Node 复用 #19;经已有 nvm/fnm 装下限版本 #20;新装 fnm 为 #22)→
-//! 确保 git(Prerequisite,工单 #3)→ 复制 setup-coder 本体 → npm 装 Tool(注册表)→
-//! 生成 shim(绝对路径 exec 选定 Node,无 PATH 前置,工单 #21)→ 冒烟(`--version`,Installed 定义)→ 注入 PATH → 写 state.json。
-//! 重跑 = 修复/升级,幂等。
+//! (达标裸 Node 复用 #19;经已有 nvm/fnm 装下限版本 #20;无 Node 无管理器则新装 fnm
+//! 兜底 #22)→ 确保 git(Prerequisite,工单 #3)→ 复制 setup-coder 本体 → npm 装 Tool
+//! (注册表)→ 生成 shim(绝对路径 exec 选定 Node,无 PATH 前置,工单 #21)→ 冒烟
+//! (`--version`,Installed 定义)→ 注入 PATH → 写 state.json。重跑 = 修复/升级,幂等。
 
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::net;
 use crate::node_plan::{self, NodeFacts, NodePlan};
 use crate::node_source::{self, NodeSource};
 use crate::platform;
 use crate::prefix::{NodeSourceKind, NodeState, Prefix, State, ToolState};
 use crate::registry::{self, Tool};
-
-// Node LTS 版本常量与解析接缝同在 `node_source`(下载路径用,保底方案)。
 
 /// Tool 安装的 npm registry(npmmirror)
 const NPM_REGISTRY: &str = "https://registry.npmmirror.com";
@@ -42,12 +39,12 @@ fn install(tool: Option<&str>) -> Result<(), Box<dyn Error>> {
     println!("安装进 Private Prefix:{}", prefix.root().display());
     prefix.create_skeleton()?;
 
-    let node = decide_node(&prefix, &tools, &mut state)?;
+    // 决策点解析出选定 Node:达标裸 Node 复用、经已有 nvm/fnm、或新装 fnm 兜底;
+    // 全部指向用户机器上的绝对路径,Node 不落前缀(ADR-0003,无前缀 node/ 目录)
+    let node = decide_node(&tools, &mut state)?;
     ensure_git(&prefix)?;
     install_setup_coder_self(&prefix)?;
     write_npmrc(&prefix)?;
-
-    // 决策点已解析出选定 Node(达标裸 Node 复用,或保底前缀内 Node)
     let mut installed = Vec::new();
     for t in tools {
         install_tool(&prefix, &node, t, &mut installed)?;
@@ -93,24 +90,18 @@ fn resolve_tools(tool: Option<&str>) -> Result<Vec<&'static Tool>, Box<dyn Error
     }
 }
 
-/// Node 决策点(工单 #19/#20):探测机器事实 → 纯决策 → 按方案执行并落账。
+/// Node 决策点(工单 #19/#20/#22):探测机器事实 → 纯决策 → 按方案执行并落账。
 ///
-/// 已实现:达标裸 Node 复用(#19)、经已有 nvm/fnm 装下限版本(#20);
-/// 不下载 Node tarball、不新装 fnm、不创建前缀 node/ 目录;
-/// Tool 安装/shim/冒烟全部用选定 Node 的绝对路径。
-/// 新装 fnm 方案由工单 #22 实现,本切片给出明确中文错误。
+/// 方案:达标裸 Node 复用(#19)、经已有 nvm/fnm 装下限版本(#20)、
+/// 无 Node 无管理器时新装 fnm 兜底(#22)。不下载 Node tarball、不创建前缀 node/
+/// 目录;Tool 安装/shim/冒烟全部用选定 Node 的绝对路径。
 /// 返回经接缝解析出的选定 Node(= 用户机器上的绝对路径)。
-fn decide_node(
-    prefix: &Prefix,
-    tools: &[&Tool],
-    state: &mut State,
-) -> Result<NodeSource, Box<dyn Error>> {
-    decide_node_with(prefix, tools, &platform::detect_node_facts(), state)
+fn decide_node(tools: &[&Tool], state: &mut State) -> Result<NodeSource, Box<dyn Error>> {
+    decide_node_with(tools, &platform::detect_node_facts(), state)
 }
 
 /// 决策/执行纯接线:facts 由参数注入(IO 在 detect_node_facts),可单测。
 fn decide_node_with(
-    prefix: &Prefix,
     tools: &[&Tool],
     facts: &NodeFacts,
     state: &mut State,
@@ -121,13 +112,10 @@ fn decide_node_with(
             version: floor,
         } => {
             println!("复用已有 Node.js:{}(所需下限 v{floor})", path.display());
-            let node = node_source::for_plan(
-                prefix,
-                &NodePlan::ReuseBareNode {
-                    path: path.clone(),
-                    version: floor,
-                },
-            );
+            let node = node_source::for_plan(&NodePlan::ReuseBareNode {
+                path: path.clone(),
+                version: floor,
+            })?;
             // 落账(state v2):复用来源 = user_bare + 解析出的版本 + exe 绝对路径
             state.node = Some(NodeState {
                 source: NodeSourceKind::UserBare,
@@ -139,12 +127,12 @@ fn decide_node_with(
         NodePlan::UseNvm {
             ref path,
             version: floor,
-        } => use_nvm(prefix, path, &floor, state),
+        } => use_nvm(path, &floor, state),
         NodePlan::UseFnm {
             ref path,
             version: floor,
-        } => use_fnm(prefix, path, &floor, state),
-        other => Err(unsupported_plan_error(&other).into()),
+        } => use_fnm(path, &floor, state),
+        NodePlan::InstallFnm { version: floor } => install_fnm_branch(&floor, state),
     }
 }
 
@@ -154,7 +142,6 @@ fn decide_node_with(
 /// 函数,platform 层 source nvm.sh 执行)。绝不改用户的 nvm default alias(不劫持)。
 /// fnm 若同时存在,完全不触碰。落账 user_nvm + 解析出的 exe 绝对路径。
 fn use_nvm(
-    prefix: &Prefix,
     nvm_dir: &Path,
     floor: &semver::Version,
     state: &mut State,
@@ -163,7 +150,10 @@ fn use_nvm(
     if let Some(exe) = platform::resolve_manager_node(nvm_dir, &spec, platform::ManagerKind::Nvm) {
         println!("经 nvm 复用已装 Node.js v{spec}:{}", exe.display());
     } else {
-        println!("经 nvm({})安装 Node.js v{spec}(所需下限)…", nvm_dir.display());
+        println!(
+            "经 nvm({})安装 Node.js v{spec}(所需下限)…",
+            nvm_dir.display()
+        );
         let exe = platform::nvm_install_and_resolve(nvm_dir, &spec)?;
         // 自检:解析出的 node 必须真实存在且版本正确(防 nvm which 异常输出)
         if platform::version_output_of(&exe).as_deref() != Some(format!("v{spec}").as_str()) {
@@ -175,13 +165,10 @@ fn use_nvm(
         }
         println!("已用 nvm 安装 Node.js v{spec}:{}", exe.display());
     }
-    let node = node_source::for_plan(
-        prefix,
-        &NodePlan::UseNvm {
-            path: nvm_dir.to_path_buf(),
-            version: floor.clone(),
-        },
-    );
+    let node = node_source::for_plan(&NodePlan::UseNvm {
+        path: nvm_dir.to_path_buf(),
+        version: floor.clone(),
+    })?;
     state.node = Some(NodeState {
         source: NodeSourceKind::UserNvm,
         version: node.version().to_string(),
@@ -197,7 +184,6 @@ fn use_nvm(
 /// (首次经 fnm 装时设为默认,使该 Node 在用户终端可解析)。
 /// 落账 user_fnm + 解析出的 exe 绝对路径。
 fn use_fnm(
-    prefix: &Prefix,
     fnm_path: &Path,
     floor: &semver::Version,
     state: &mut State,
@@ -206,17 +192,17 @@ fn use_fnm(
     if let Some(exe) = platform::resolve_manager_node(fnm_path, &spec, platform::ManagerKind::Fnm) {
         println!("经 fnm 复用已装 Node.js v{spec}:{}", exe.display());
     } else {
-        println!("经 fnm({})安装 Node.js v{spec}(所需下限)…", fnm_path.display());
+        println!(
+            "经 fnm({})安装 Node.js v{spec}(所需下限)…",
+            fnm_path.display()
+        );
         platform::fnm_install_and_default(&platform::fnm_exe_path(fnm_path), &spec)?;
         println!("已用 fnm 安装 Node.js v{spec} 并设为默认");
     }
-    let node = node_source::for_plan(
-        prefix,
-        &NodePlan::UseFnm {
-            path: fnm_path.to_path_buf(),
-            version: floor.clone(),
-        },
-    );
+    let node = node_source::for_plan(&NodePlan::UseFnm {
+        path: fnm_path.to_path_buf(),
+        version: floor.clone(),
+    })?;
     state.node = Some(NodeState {
         source: NodeSourceKind::UserFnm,
         version: node.version().to_string(),
@@ -225,77 +211,74 @@ fn use_fnm(
     Ok(node)
 }
 
-/// 尚未实现的 Node 来源方案(#22 新装 fnm)的统一中文报错
-fn unsupported_plan_error(plan: &NodePlan) -> String {
-    let floor = plan_floor(plan);
-    let path = match plan {
-        NodePlan::InstallFnm { .. } => "自动安装 fnm 版本管理器".to_string(),
-        NodePlan::UseNvm { .. } => unreachable!("经 nvm 安装已实现,不会走到这里"),
-        NodePlan::UseFnm { .. } => unreachable!("经 fnm 安装已实现,不会走到这里"),
-        NodePlan::ReuseBareNode { .. } => unreachable!("复用裸 Node 已实现,不会走到这里"),
-    };
-    format!(
-        "当前 Node 版本低于所需下限 v{floor};{path}尚未支持(将随后续版本提供)。\
-         请升级 Node 到 v{floor} 以上后重跑 install,或等待后续版本支持版本管理器安装"
-    )
-}
+/// 新装 fnm 兜底(工单 #22):无 Node 且无版本管理器的零输入路径。
+///
+/// 步骤:经镜像链下载 fnm 到平台默认数据目录(unix `~/.local/share/fnm`,与探测
+/// `detect_node_facts` 同一定义——重跑探测即命中 UseFnm 分支,幂等成立)→
+/// `fnm install <floor>` + `fnm default <floor>` → 幂等注入 fnm shell 钩子(记为
+/// FnmHook 注入,uninstall 按它精确回滚)→ 落账。
+///
+/// 落账模型(ADR-0003):虽由 setup-coder 代装,来源仍记 user_fnm(没有也不该有
+/// prefix 来源值——Node 永不落前缀);「是否由 setup-coder 代装 fnm」由 state.json
+/// 里的 FnmHook rc 注入记录区分,不靠来源枚举。
+fn install_fnm_branch(
+    floor: &semver::Version,
+    state: &mut State,
+) -> Result<NodeSource, Box<dyn Error>> {
+    let home = std::env::home_dir()
+        .ok_or_else(|| io_error("无法确定用户家目录(HOME 未设置),无法安装 fnm"))?;
+    let fnm_dir = platform::fnm_default_dir_impl(&home);
+    let spec = floor.to_string();
 
-/// 方案携带的所选工具集 Node 版本下限(决策层放入各变体)
-fn plan_floor(plan: &NodePlan) -> &semver::Version {
-    match plan {
-        NodePlan::ReuseBareNode { version, .. }
-        | NodePlan::UseNvm { version, .. }
-        | NodePlan::UseFnm { version, .. }
-        | NodePlan::InstallFnm { version } => version,
-    }
-}
+    // 1. 装 fnm 本体(幂等:已能跑则复用;镜像容错链下载)
+    let fnm_exe = platform::install_fnm(&prefix_cache_dir()?, &fnm_dir)?;
+    println!(
+        "已安装 fnm {}:{}",
+        fnm_version_of(&fnm_exe),
+        fnm_exe.display()
+    );
 
-/// 保底路径(暂未接线):装 Node LTS 到前缀 node/,已是指定版本则跳过(幂等)。
-/// #22 的 InstallFnm 分支落地后,前缀内 Node 随 ADR-0003 迁移一并移除。
-#[allow(dead_code)]
-fn ensure_node(prefix: &Prefix, node: &NodeSource) -> Result<(), Box<dyn Error>> {
-    if node_version_matches(node)? {
-        println!("Node.js {} 已就位,跳过下载", node.version());
-    } else {
-        let suffix = platform::node_dist_suffix()?;
-        let ext = platform::node_archive_ext();
-        println!("下载 Node.js {}({suffix})…", node.version());
-        let archive = prefix
-            .cache_dir()
-            .join(net::node_archive_name(node.version(), suffix, ext));
-        let hit = net::download_first(&net::node_urls(node.version(), suffix, ext), &archive)?;
-        println!("已从 Mirror 下载:{hit}");
+    // 2. 经 fnm 装下限 Node 并设为默认(新装 fnm 必无该版本,直接装)
+    println!("经 fnm 安装 Node.js v{spec}(所需下限)…");
+    platform::fnm_install_and_default(&fnm_exe, &spec)?;
+    println!("已用 fnm 安装 Node.js v{spec} 并设为默认");
 
-        // 解压到暂存目录,成功后整体替换 node/(避免半残前缀)
-        let staging = prefix.cache_dir().join("node-staging");
-        let _ = fs::remove_dir_all(&staging);
-        platform::extract_node_archive(&archive, &staging)?;
-        let node_dir = node.node_dir();
-        let _ = fs::remove_dir_all(node_dir);
-        fs::rename(&staging, node_dir)?;
-
-        // 冒烟:刚解压的 node 必须能跑且版本对
-        if !node_version_matches(node)? {
-            return Err(format!(
-                "Node.js 解压后自检失败:期望 {},`node --version` 未通过",
-                node.version()
-            )
-            .into());
+    // 3. 幂等注入 fnm shell 钩子(FnmHook 记录,供精确回滚);重跑不重复注入
+    for injection in platform::inject_fnm_hook()? {
+        if let crate::prefix::PathInjection::FnmHook { file, line } = &injection {
+            println!("已向 {} 注入 fnm 钩子:{line}", file.display());
         }
-        println!("Node.js {} 安装完成", node.version());
+        state.record_injection(injection);
     }
-    Ok(())
+    println!("新开终端即可获得 node/npm(fnm 钩子生效)");
+
+    // 4. 解析 + 落账:与 UseFnm 同一条 resolve_manager_node → from_exe(实体化)路径
+    let node = node_source::for_plan(&NodePlan::InstallFnm {
+        version: floor.clone(),
+    })?;
+    state.node = Some(NodeState {
+        source: NodeSourceKind::UserFnm,
+        version: node.version().to_string(),
+        exe: Some(node.exe().to_path_buf()),
+    });
+    Ok(node)
 }
-/// 选定 Node 存在且 `--version` 输出等于目标版本
-fn node_version_matches(node: &NodeSource) -> Result<bool, Box<dyn Error>> {
-    let exe = node.exe();
-    if !exe.exists() {
-        return Ok(false);
-    }
-    let Ok(out) = Command::new(exe).arg("--version").output() else {
-        return Ok(false); // 跑不起来 = 当作未装,重装修复
-    };
-    Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == node.version())
+
+/// 新装 fnm 展示用的版本串(`fnm --version`;解析不到则显示「未知版本」)
+fn fnm_version_of(fnm_exe: &Path) -> String {
+    platform::version_output_of(fnm_exe)
+        .and_then(|out| platform::parse_fnm_version(&out))
+        .map(|v| format!("v{v}"))
+        .unwrap_or_else(|| "(版本未知)".to_string())
+}
+
+/// 前缀下载缓存目录(经 Prefix::home;fnm zip 缓存进前缀,可整删)
+fn prefix_cache_dir() -> Result<PathBuf, Box<dyn Error>> {
+    Ok(Prefix::home()?.cache_dir())
+}
+
+fn io_error(msg: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::NotFound, msg.to_string())
 }
 
 /// Prerequisite:确保 git 可用(工单 #3;平台做法收敛在 platform/)
@@ -493,10 +476,17 @@ mod tests {
     }
 
     /// PATH 构造:选定 Node 的 bin 目录在最前(复用 Node 时 = 用户机器上的目录)
+    #[cfg(unix)]
     #[test]
     fn path_with_node_prepends_resolved_bin_dir() {
-        let prefix = Prefix::new(PathBuf::from("/x/.setup-coder"));
-        let node = node_source::from_state(&prefix, &State::default());
+        let Some(node_path) = which_node() else {
+            return; // 极端无 node 的开发机:跳过
+        };
+        let node = node_source::for_plan(&NodePlan::ReuseBareNode {
+            path: node_path,
+            version: semver::Version::new(22, 19, 0),
+        })
+        .unwrap();
         let path = path_with_node(&node).unwrap();
         assert_eq!(std::env::split_paths(&path).next().unwrap(), node.bin_dir());
     }
@@ -506,17 +496,15 @@ mod tests {
     #[test]
     fn npm_env_scoped_to_prefix_for_reused_node() {
         let prefix = Prefix::new(PathBuf::from("/x/.setup-coder"));
-        let node = node_source::for_plan(
-            &prefix,
-            &NodePlan::ReuseBareNode {
-                // 本机(开发机)必有 node(构建依赖);绝对路径布局 = Node 发行版
-                path: std::env::current_exe()
-                    .ok()
-                    .and_then(|_| which_node())
-                    .expect("开发机 PATH 上应有 node"),
-                version: semver::Version::new(22, 19, 0),
-            },
-        );
+        let node = node_source::for_plan(&NodePlan::ReuseBareNode {
+            // 本机(开发机)必有 node(构建依赖);绝对路径布局 = Node 发行版
+            path: std::env::current_exe()
+                .ok()
+                .and_then(|_| which_node())
+                .expect("开发机 PATH 上应有 node"),
+            version: semver::Version::new(22, 19, 0),
+        })
+        .unwrap();
         let cmd = npm_command(&prefix, &node, &["install", "--global", "@openai/codex"]).unwrap();
         // 入口 = 复用 Node 的绝对 exe + 该 Node 自带的 npm-cli.js
         assert_eq!(cmd.get_program(), node.exe().as_os_str());
@@ -563,56 +551,19 @@ mod tests {
 
         // 恰等于下限 → 复用
         let mut state = State::default();
-        let node = decide_node_with(&prefix, &tools, &bare(floor.clone()), &mut state).unwrap();
+        let node = decide_node_with(&tools, &bare(floor.clone()), &mut state).unwrap();
         assert_eq!(node.exe(), node_path);
         assert_eq!(node.kind(), NodeSourceKind::UserBare);
         let recorded = state.node.expect("复用应落账 Node 记录");
         assert_eq!(recorded.source, NodeSourceKind::UserBare);
         assert_eq!(recorded.exe.as_deref(), Some(node_path.as_path()));
         assert!(!recorded.version.is_empty(), "落账版本应为解析出的实际版本");
-        // 不创建前缀 node/ 目录(复用路径无任何下载/解压动作)
-        assert!(!prefix.node_dir().exists());
+        // 不落前缀:复用路径只记 user_bare 落账,前缀不存在任何 node 布局路径
+        assert!(!prefix.root().exists());
 
         // 高于下限 → 复用(同上)
         let mut state = State::default();
-        decide_node_with(
-            &prefix,
-            &tools,
-            &bare(semver::Version::new(99, 0, 0)),
-            &mut state,
-        )
-        .unwrap();
-        assert_eq!(state.node.unwrap().source, NodeSourceKind::UserBare);
-    }
-
-    /// 略低于下限(无其他来源)→ 明确中文错误(InstallFnm 未实现),不走下载、不落账。
-    /// 合成版本「恰好只差一个 patch」以贴合「略低于下限」场景;下限 patch 为 0 时
-    /// 退化为任意不达标旧版本(决策只看大小比较,语义一致)。
-    #[test]
-    fn decide_wiring_just_below_floor_errors_without_download() {
-        let prefix = Prefix::new(PathBuf::from("/x/.setup-coder"));
-        let Some(node_path) = which_node() else {
-            return; // 极端无 node 的开发机:跳过
-        };
-        let tools: Vec<&Tool> = registry::all().iter().collect();
-        let floor = registry::floor_for_tools(&tools);
-        let just_below = if floor.patch > 0 {
-            semver::Version::new(floor.major, floor.minor, floor.patch - 1)
-        } else {
-            semver::Version::new(0, 0, 1)
-        };
-        let facts = NodeFacts {
-            bare_node: Some((just_below, node_path)),
-            nvm: None,
-            fnm: None,
-        };
-        let mut state = State::default();
-        let err = decide_node_with(&prefix, &tools, &facts, &mut state).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains(&floor.to_string()), "报错应含所需下限:{msg}");
-        assert!(msg.contains("尚未支持"), "报错应说明该路径未实现:{msg}");
-        assert!(msg.contains("fnm"), "无其他来源时应指向新装 fnm 路径:{msg}");
-        assert!(state.node.is_none(), "失败路径不得落账 Node 记录");
+        decide_node_with(&tools, &bare(semver::Version::new(99, 0, 0)), &mut state).unwrap();
     }
 
     /// 工单 #20:nvm 存在 + 裸 Node 不达标 → 经 nvm 装/复用下限版本,落账 user_nvm + 解析路径。
@@ -622,7 +573,8 @@ mod tests {
     #[test]
     fn decide_wiring_use_nvm_records_user_nvm_and_reuses() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("setup-coder-test-usenvm-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("setup-coder-test-usenvm-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let prefix = Prefix::new(root.join(".setup-coder"));
         let tools: Vec<&Tool> = registry::all().iter().collect();
@@ -635,12 +587,15 @@ mod tests {
         fs::set_permissions(&stub_exe, fs::Permissions::from_mode(0o755)).unwrap();
 
         let facts = NodeFacts {
-            bare_node: Some((semver::Version::new(0, 0, 1), PathBuf::from("/usr/bin/node"))),
+            bare_node: Some((
+                semver::Version::new(0, 0, 1),
+                PathBuf::from("/usr/bin/node"),
+            )),
             nvm: Some((semver::Version::new(1, 0, 0), nvm_dir.clone())),
             fnm: None,
         };
         let mut state = State::default();
-        let node = decide_node_with(&prefix, &tools, &facts, &mut state).unwrap();
+        let node = decide_node_with(&tools, &facts, &mut state).unwrap();
         // 合并 #21 后选定 exe 经 from_exe canonicalize(macOS /var→/private/var 归一)
         let expected_exe = std::fs::canonicalize(&stub_exe).unwrap_or_else(|_| stub_exe.clone());
         assert_eq!(node.exe(), expected_exe.as_path());
@@ -652,8 +607,12 @@ mod tests {
         assert_eq!(recorded.version, format!("v{floor}"));
 
         // 幂等:二次调用(状态已有记录 + 管理器已有版本)仍复用同一路径
-        let node2 = decide_node_with(&prefix, &tools, &facts, &mut state).unwrap();
-        assert_eq!(node2.exe(), expected_exe.as_path(), "重跑不得重装,应复用同一 exe");
+        let node2 = decide_node_with(&tools, &facts, &mut state).unwrap();
+        assert_eq!(
+            node2.exe(),
+            expected_exe.as_path(),
+            "重跑不得重装,应复用同一 exe"
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -663,7 +622,8 @@ mod tests {
     #[test]
     fn decide_wiring_use_fnm_records_user_fnm_and_reuses() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("setup-coder-test-fnm-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("setup-coder-test-fnm-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let prefix = Prefix::new(root.join(".setup-coder"));
         let tools: Vec<&Tool> = registry::all().iter().collect();
@@ -676,12 +636,15 @@ mod tests {
         fs::set_permissions(&stub_exe, fs::Permissions::from_mode(0o755)).unwrap();
 
         let facts = NodeFacts {
-            bare_node: Some((semver::Version::new(0, 0, 1), PathBuf::from("/usr/bin/node"))),
+            bare_node: Some((
+                semver::Version::new(0, 0, 1),
+                PathBuf::from("/usr/bin/node"),
+            )),
             nvm: None,
             fnm: Some((semver::Version::new(1, 0, 0), fnm_dir.clone())),
         };
         let mut state = State::default();
-        let node = decide_node_with(&prefix, &tools, &facts, &mut state).unwrap();
+        let node = decide_node_with(&tools, &facts, &mut state).unwrap();
         // 合并 #21 后选定 exe 经 from_exe canonicalize(macOS /var→/private/var 归一)
         let expected_exe = std::fs::canonicalize(&stub_exe).unwrap_or_else(|_| stub_exe.clone());
         assert_eq!(node.exe(), expected_exe.as_path());
@@ -692,28 +655,127 @@ mod tests {
         assert_eq!(recorded.exe.as_deref(), Some(expected_exe.as_path()));
 
         // 幂等:二次调用仍复用同一路径
-        let node2 = decide_node_with(&prefix, &tools, &facts, &mut state).unwrap();
+        let node2 = decide_node_with(&tools, &facts, &mut state).unwrap();
         assert_eq!(node2.exe(), expected_exe.as_path());
         fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 低于下限、无任何来源(nvm/fnm 都没有)→ 明确中文错误指向新装 fnm(#22 未实现),
-    /// 不走下载、不落账。
+    /// 工单 #22:无 node/nvm/fnm → 新装 fnm 兜底。桩出整套 fnm 行为(HOME 指到
+    /// 临时根,fnm 数据目录在平台默认位 ~/.local/share/fnm):
+    /// - install_fnm 幂等复用:桩 fnm 可执行(`--version` 报版本)→ 不走镜像下载;
+    /// - `fnm install/default` = 桩脚本按布局落 node exe(免网络,免真实 Node);
+    /// - 钩子注入:注入平台登录 rc 的 FnmHook 行,记入 state;重跑不重复(幂等);
+    /// - 落账 user_fnm + 解析出的 exe 绝对路径(与 UseFnm 同一解析路径)。
+    #[cfg(unix)]
     #[test]
-    fn decide_wiring_below_floor_no_manager_errors() {
-        let prefix = Prefix::new(PathBuf::from("/x/.setup-coder"));
+    fn decide_wiring_install_fnm_end_to_end_with_stub() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "setup-coder-test-installfnm-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        // 前缀 cache 走真实 Prefix::home(与 install 一致)→ 隔离 HOME 后落在临时根
+        let _home = crate::test_util::ScopedHome::set(&root);
         let tools: Vec<&Tool> = registry::all().iter().collect();
         let floor = registry::floor_for_tools(&tools);
+
+        // 桩 fnm(平台默认数据目录 ~/.local/share/fnm/fnm):
+        // `fnm --version` → 报版本(install_fnm 幂等复用命中);
+        // `fnm install <v>` → 按 fnm 布局落 node exe(可执行,--version 报该版本);
+        // `fnm default <v>` → no-op。
+        let fnm_dir = root.join(".local/share/fnm");
+        fs::create_dir_all(&fnm_dir).unwrap();
+        let fnm_stub = fnm_dir.join("fnm");
+        let script = "#!/bin/sh\n\
+             FNM_DIR=\"${FNM_DIR:-$(cd \"$(dirname \"$0\")\" && pwd)}\"\n\
+             case \"$1\" in\n\
+             --version) echo 'fnm 1.39.0' ;;\n\
+             install)\n\
+             exe=\"$FNM_DIR/node-versions/v$2/installation/bin/node\"\n\
+             mkdir -p \"$(dirname \"$exe\")\"\n\
+             printf '#!/bin/sh\\necho v%s\\n' \"$2\" > \"$exe\"\n\
+             chmod +x \"$exe\" ;;\n\
+             esac\n";
+        fs::write(&fnm_stub, script).unwrap();
+        fs::set_permissions(&fnm_stub, fs::Permissions::from_mode(0o755)).unwrap();
+
         let facts = NodeFacts {
-            bare_node: Some((semver::Version::new(0, 0, 1), PathBuf::from("/usr/bin/node"))),
+            bare_node: None,
             nvm: None,
             fnm: None,
         };
-        let err = decide_node_with(&prefix, &tools, &facts, &mut State::default()).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains(&floor.to_string()), "报错应含所需下限:{msg}");
-        assert!(msg.contains("fnm"), "无其他来源时应指向新装 fnm 路径:{msg}");
-        assert!(msg.contains("尚未支持"), "报错应说明该路径未实现:{msg}");
+        let mut state = State::default();
+        let node = decide_node_with(&tools, &facts, &mut state).unwrap();
+
+        // 解析:fnm 布局下的 node exe(canonicalize 后),来源 user_fnm,版本 = 下限
+        let stub_node = fnm_dir.join(format!("node-versions/v{floor}/installation/bin/node"));
+        let expected_exe = std::fs::canonicalize(&stub_node).unwrap_or_else(|_| stub_node.clone());
+        assert_eq!(node.exe(), expected_exe.as_path());
+        assert_eq!(node.kind(), NodeSourceKind::UserFnm);
+        assert_eq!(node.version(), format!("v{floor}"));
+        // 落账:user_fnm + 版本 + exe;Node 不落前缀(前缀根在隔离 HOME 下不存在 node/)
+        let recorded = state.node.clone().expect("应落账 user_fnm");
+        assert_eq!(recorded.source, NodeSourceKind::UserFnm);
+        assert_eq!(recorded.exe.as_deref(), Some(expected_exe.as_path()));
+        assert!(!root.join(".setup-coder/node").exists());
+
+        // 钩子注入:平台登录 rc 获得 FnmHook 行(幂等接缝),记入 state 供精确回滚
+        let hook_line = platform::fnm_hook_line();
+        let hooks: Vec<_> = state
+            .path_injections
+            .iter()
+            .filter(|i| matches!(i, crate::prefix::PathInjection::FnmHook { .. }))
+            .collect();
+        assert!(!hooks.is_empty(), "应至少注入一个 rc 的 FnmHook 记录");
+        for injection in &state.path_injections {
+            let crate::prefix::PathInjection::FnmHook { file, line } = injection else {
+                panic!("InstallFnm 只记 FnmHook 注入:{injection:?}");
+            };
+            assert_eq!(line, &hook_line);
+            let content = fs::read_to_string(file).unwrap();
+            assert_eq!(
+                content.matches("fnm env").count(),
+                1,
+                "{} 应恰有一行钩子",
+                file.display()
+            );
+        }
+
+        // 幂等重跑:不再下载/重装(fnm 已可用),钩子不重复注入、记录不重复落账
+        let hook_count = hooks.len();
+        let node2 = decide_node_with(&tools, &facts, &mut state).unwrap();
+        assert_eq!(node2.exe(), expected_exe.as_path(), "重跑应复用同一 exe");
+        assert_eq!(
+            state.path_injections.len(),
+            hook_count,
+            "重跑不得新增注入记录"
+        );
+        for injection in &state.path_injections {
+            let crate::prefix::PathInjection::FnmHook { file, .. } = injection else {
+                panic!("InstallFnm 只记 FnmHook 注入:{injection:?}");
+            };
+            let content = fs::read_to_string(file).unwrap();
+            assert_eq!(
+                content.matches("fnm env").count(),
+                1,
+                "{} 重跑不得重复行",
+                file.display()
+            );
+        }
+
+        // FnmHook 记录可精确回滚(uninstall 按记录逐字删行)
+        for injection in state.path_injections.clone() {
+            assert!(platform::rollback_injection(&injection).unwrap());
+        }
+        for injection in &state.path_injections {
+            let crate::prefix::PathInjection::FnmHook { file, .. } = injection else {
+                unreachable!()
+            };
+            assert!(!fs::read_to_string(file).unwrap().contains("fnm env"));
+        }
+        fs::remove_dir_all(&root).unwrap();
     }
 
     /// 测试机 PATH 上的 node 绝对路径(复用决策接线的真实探测对象)

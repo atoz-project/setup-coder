@@ -22,8 +22,8 @@ pub const STATE_VERSION: u32 = 2;
 /// 布局(详见 ARCHITECTURE.md):
 /// `bin/` 唯一进 PATH;`npm/` npm prefix;`git/` 仅 Windows;
 /// `cache/` 下载缓存;`state.json` 安装清单。
-/// 注:新模型下 Node 永不落前缀(经用户级 nvm/fnm 安装,ADR-0003;#19 起裸 Node
-/// 直接复用);`node_dir` 等仅服务保底下载路径(#22 的 InstallFnm 分支落地后移除)。
+/// 注:布局中没有 `node/`——Node 永不落私有前缀(ADR-0003,工单 #22):达标裸 Node
+/// 直接复用,否则经用户级 nvm/fnm(缺失时新装 fnm)装入用户级目录。
 #[derive(Debug, Clone)]
 pub struct Prefix {
     root: PathBuf,
@@ -49,21 +49,6 @@ impl Prefix {
     /// `bin/`:唯一进 PATH 的目录(setup-coder 本体 + 各 Tool 的 shim)
     pub fn bin_dir(&self) -> PathBuf {
         self.root.join("bin")
-    }
-
-    /// `node/`:Node LTS 解压目录
-    pub fn node_dir(&self) -> PathBuf {
-        self.root.join("node")
-    }
-
-    /// Node 可执行文件所在目录(unix `node/bin`,Windows `node/`)
-    pub fn node_bin_dir(&self) -> PathBuf {
-        self.node_dir().join(platform::node_bin_subdir())
-    }
-
-    /// node / node.exe 本体
-    pub fn node_exe(&self) -> PathBuf {
-        self.node_bin_dir().join(platform::exe_name("node"))
     }
 
     /// `npm/`:npm prefix(Tool 实体装在 lib/node_modules,bin 在 bin/)
@@ -241,7 +226,6 @@ mod tests {
     fn layout_matches_architecture_doc() {
         let p = Prefix::new(PathBuf::from("/home/u/.setup-coder"));
         assert_eq!(p.bin_dir(), Path::new("/home/u/.setup-coder/bin"));
-        assert_eq!(p.node_dir(), Path::new("/home/u/.setup-coder/node"));
         assert_eq!(p.npm_dir(), Path::new("/home/u/.setup-coder/npm"));
         assert_eq!(p.git_dir(), Path::new("/home/u/.setup-coder/git"));
         assert!(p.git_exe().ends_with(if cfg!(windows) {
@@ -255,16 +239,12 @@ mod tests {
     }
 
     #[test]
-    fn node_and_npm_bin_dirs_follow_platform_layout() {
+    fn npm_bin_dir_follows_platform_layout() {
         let p = Prefix::new(PathBuf::from("/x/.setup-coder"));
         if cfg!(windows) {
-            assert_eq!(p.node_bin_dir(), Path::new("/x/.setup-coder/node"));
             assert_eq!(p.npm_bin_dir(), Path::new("/x/.setup-coder/npm"));
-            assert!(p.node_exe().ends_with("node.exe"));
         } else {
-            assert_eq!(p.node_bin_dir(), Path::new("/x/.setup-coder/node/bin"));
             assert_eq!(p.npm_bin_dir(), Path::new("/x/.setup-coder/npm/bin"));
-            assert!(p.node_exe().ends_with("node/bin/node"));
         }
     }
 
@@ -381,13 +361,19 @@ mod tests {
         // 落盘带 kind=fnm_hook 标签并完整往返
         s.save(&p).unwrap();
         let text = fs::read_to_string(p.state_path()).unwrap();
-        assert!(text.contains("\"fnm_hook\""), "落盘文本应含 fnm_hook:{text}");
+        assert!(
+            text.contains("\"fnm_hook\""),
+            "落盘文本应含 fnm_hook:{text}"
+        );
         assert_eq!(State::load(&p).unwrap(), s);
 
         // 精确行回滚:只删记录行,其余内容保留
         fs::write(&rc, format!("export FOO=1\n{hook}\nexport BAR=2\n")).unwrap();
         assert!(platform::rollback_injection(&s.path_injections[0]).unwrap());
-        assert_eq!(fs::read_to_string(&rc).unwrap(), "export FOO=1\nexport BAR=2\n");
+        assert_eq!(
+            fs::read_to_string(&rc).unwrap(),
+            "export FOO=1\nexport BAR=2\n"
+        );
         // 已删除 → 幂等 Ok(false);行从不存在 → 同样 Ok(false),绝不模糊匹配
         assert!(!platform::rollback_injection(&s.path_injections[0]).unwrap());
         fs::write(&rc, "export FOO=1\n").unwrap();
@@ -416,8 +402,6 @@ mod tests {
 
         fs::remove_dir_all(p.root()).unwrap();
     }
-
-
 
     #[test]
     fn corrupted_state_is_an_error_not_a_panic() {
