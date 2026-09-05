@@ -1,14 +1,16 @@
-//! `uninstall` 子命令:按 state.json 精确回滚 PATH 注入,再删除 Private Prefix。
+//! `uninstall` 子命令:按 state.json 精确回滚 PATH/fnm 钩子注入,再删除 Private Prefix。
 //!
 //! 不做模糊匹配:只回滚安装清单里逐字记录的改动;系统 git(apt/CLT 所装)
-//! 在前缀外、清单无记录,绝不动。Windows 自身 exe 残留策略见
-//! platform::remove_prefix 的决策注释(工单 #4,真机验证归工单 #7)。
+//! 在前缀外、清单无记录,绝不动。用户的 Node 环境(nvm/fnm/裸 Node,含
+//! setup-coder 代装的 fnm)一律保留,只按来源打印保留提示与手工移除步骤
+//! (ADR-0003,工单 #23)。Windows 自身 exe 残留策略见 platform::remove_prefix
+//! 的决策注释(工单 #4,真机验证归工单 #7)。
 
 use std::error::Error;
 use std::io::{self, Write};
 
 use crate::platform;
-use crate::prefix::{PathInjection, Prefix, State};
+use crate::prefix::{NodeSourceKind, NodeState, PathInjection, Prefix, State};
 
 pub fn run(yes: bool) {
     if let Err(e) = uninstall(yes) {
@@ -70,6 +72,9 @@ fn uninstall(yes: bool) -> Result<(), Box<dyn Error>> {
     }
 
     println!();
+    if let Some(hint) = preserved_hint(&state) {
+        println!("保留的 Node 环境:{hint}");
+    }
     if rollback_failed > 0 {
         println!("卸载完成,但有 {rollback_failed} 条 PATH 改动回滚失败,请按上面的警告手工核对。");
     } else {
@@ -78,7 +83,7 @@ fn uninstall(yes: bool) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// 中文确认提示:列出将发生的改动,读 stdin 一行;EOF/非 y 视为取消(安全默认)
+/// 中文确认提示:列出将发生的改动与将保留的 Node 环境,读 stdin 一行;EOF/非 y 视为取消(安全默认)
 fn confirm(prefix: &Prefix, state: &State) -> io::Result<bool> {
     println!("即将卸载 setup-coder:");
     println!(
@@ -86,12 +91,89 @@ fn confirm(prefix: &Prefix, state: &State) -> io::Result<bool> {
         state.path_injections.len()
     );
     println!("  2. 删除 Private Prefix:{}", prefix.root().display());
+    match preserved_summary(state) {
+        Some(summary) => println!("  3. 保留你的 Node 环境(不删除):{summary}"),
+        None => println!("  3. 无 Node 记录(清单里未完成 Node 安装)"),
+    }
     println!();
     print!("确认卸载?[y/N] ");
     io::stdout().flush()?;
     let mut reply = String::new();
     io::stdin().read_line(&mut reply)?;
     Ok(confirmed(&reply))
+}
+
+// ---------------------------------------------------------------------------
+// 保留提示(工单 #23,ADR-0003):uninstall 绝不删用户的 nvm/fnm/Node,
+// 按 v2 清单的 node.source 给出「保留了什么 + 手工移除步骤」。
+// ---------------------------------------------------------------------------
+
+/// 确认提示里的一行式「保留摘要」(来源 + 版本)。
+///
+/// 管理器来源带上记录里的 node exe 路径(机器上该 Node 的位置,卸载不会删它)。
+fn preserved_summary(state: &State) -> Option<String> {
+    let node = state.node.as_ref()?;
+    let location = node_location(node);
+    Some(match node.source {
+        NodeSourceKind::UserBare => {
+            format!("你机器上原有的 Node({},{location})将被保留", node.version)
+        }
+        NodeSourceKind::UserNvm => {
+            format!("你的 nvm 与其 Node({},{location})将被保留", node.version)
+        }
+        NodeSourceKind::UserFnm => {
+            format!("fnm 及其 Node({},{location})将被保留", node.version)
+        }
+    })
+}
+
+/// 记录里该 Node 的位置:管理器来源取 exe 路径,裸 Node 在 PATH 上。
+fn node_location(node: &NodeState) -> String {
+    match &node.exe {
+        Some(exe) => format!("{}", exe.display()),
+        None => "PATH 上".to_string(),
+    }
+}
+
+/// 卸载完成后按来源打印的保留提示(中文)。
+///
+/// `state.node.source` 决定文案;`state.path_injections` 里是否存在 FnmHook
+/// 记录区分「fnm 是否由 setup-coder 代装」(代装时 install 一定注入了钩子行)。
+/// 提示只讲「保留了什么 + 手工移除步骤」,绝不在卸载里替用户删任何 Node 资产。
+fn preserved_hint(state: &State) -> Option<String> {
+    let node = state.node.as_ref()?;
+    let location = node_location(node);
+    Some(match node.source {
+        NodeSourceKind::UserBare => {
+            format!("你机器上原有的 Node({},{location})未受影响。", node.version)
+        }
+        NodeSourceKind::UserNvm => format!(
+            "你的 nvm 与其 Node({location})未受影响;如需移除 Node 请自行 `nvm uninstall <版本>`。"
+        ),
+        NodeSourceKind::UserFnm => {
+            if has_fnm_hook(state) {
+                let fnm_dir = crate::node_source::fnm_default_home()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|_| "fnm 数据目录".to_string());
+                format!(
+                    "setup-coder 为你安装了 fnm 与 Node({location}),卸载未删除它们。\
+                     如需移除:删除 {fnm_dir},并移除 shell rc 中残留的 fnm 钩子行(卸载已按记录回滚)。"
+                )
+            } else {
+                format!(
+                    "你的 fnm 与其 Node({location})未受影响;如需移除 Node 请自行 `fnm uninstall <版本>`。"
+                )
+            }
+        }
+    })
+}
+
+/// 清单里是否有 fnm 钩子注入记录(即「fnm 由 setup-coder 代装」的判别依据)。
+fn has_fnm_hook(state: &State) -> bool {
+    state
+        .path_injections
+        .iter()
+        .any(|i| matches!(i, PathInjection::FnmHook { .. }))
 }
 
 /// 确认输入判定:只认 y / yes(大小写不敏感),其余一律视为取消
@@ -148,5 +230,122 @@ mod tests {
         });
         assert!(hook.contains(".zshrc"));
         assert!(hook.contains("fnm"));
+    }
+
+    /// 工单 #23:按来源给出保留提示;FnmHook 记录区分「setup-coder 代装 fnm」
+    /// 与「用户自有 fnm」。提示必须指明保留内容 + 手工移除步骤。
+    fn state_with(
+        source: NodeSourceKind,
+        exe: Option<&str>,
+        injections: Vec<PathInjection>,
+    ) -> State {
+        State {
+            version: crate::prefix::STATE_VERSION,
+            node: Some(NodeState {
+                source,
+                version: "v24.19.0".into(),
+                exe: exe.map(PathBuf::from),
+            }),
+            tools: Vec::new(),
+            path_injections: injections,
+        }
+    }
+
+    #[test]
+    fn preserved_hint_user_bare() {
+        let s = state_with(NodeSourceKind::UserBare, None, Vec::new());
+        let hint = preserved_hint(&s).unwrap();
+        assert!(hint.contains("未受影响"), "bare: {hint}");
+        assert!(hint.contains("v24.19.0"), "bare 带版本: {hint}");
+        // 裸 Node 无 exe 记录 → 位置落在 PATH 上
+        assert!(hint.contains("PATH"), "bare 位置: {hint}");
+    }
+
+    #[test]
+    fn preserved_hint_user_nvm() {
+        let s = state_with(
+            NodeSourceKind::UserNvm,
+            Some("/home/u/.nvm/versions/node/v24.19.0/bin/node"),
+            Vec::new(),
+        );
+        let hint = preserved_hint(&s).unwrap();
+        assert!(hint.contains("nvm"), "nvm: {hint}");
+        assert!(hint.contains("nvm uninstall"), "nvm 手工移除步骤: {hint}");
+        assert!(hint.contains(".nvm"), "nvm 带 exe 路径: {hint}");
+        assert!(hint.contains("未受影响"), "nvm: {hint}");
+    }
+
+    #[test]
+    fn preserved_hint_user_fnm_setup_coder_installed() {
+        // 清单里有 FnmHook 记录 → fnm 由 setup-coder 代装
+        let s = state_with(
+            NodeSourceKind::UserFnm,
+            Some("/home/u/.local/share/fnm/node-versions/v24.19.0/installation/bin/node"),
+            vec![PathInjection::FnmHook {
+                file: PathBuf::from("/home/u/.zshrc"),
+                line: "eval \"$(fnm env --use-on-cd)\"  # setup-coder fnm".into(),
+            }],
+        );
+        let hint = preserved_hint(&s).unwrap();
+        assert!(hint.contains("setup-coder 为你安装了 fnm"), "代装措辞: {hint}");
+        assert!(hint.contains("fnm"), "代装给出 fnm: {hint}");
+        assert!(hint.contains("删除"), "代装给出移除步骤: {hint}");
+        // 代装情形必须提示「卸载未删除它们」
+        assert!(hint.contains("未删除"), "代装说明未删: {hint}");
+    }
+
+    #[test]
+    fn preserved_hint_user_fnm_user_owned() {
+        // 清单里无 FnmHook 记录 → fnm 是用户自己的,提示保持原样、给 fnm uninstall
+        let s = state_with(
+            NodeSourceKind::UserFnm,
+            Some("/home/u/.local/share/fnm/node-versions/v24.19.0/installation/bin/node"),
+            Vec::new(),
+        );
+        let hint = preserved_hint(&s).unwrap();
+        assert!(hint.contains("未受影响"), "自有 fnm 保留: {hint}");
+        assert!(hint.contains("fnm uninstall"), "自有 fnm 手工移除步骤: {hint}");
+        // 自有 fnm 不得出现「setup-coder 为你安装」的措辞
+        assert!(!hint.contains("为你安装"), "自有 fnm 不得误标代装: {hint}");
+    }
+
+    #[test]
+    fn has_fnm_hook_detection() {
+        let with = state_with(
+            NodeSourceKind::UserFnm,
+            Some("/x"),
+            vec![PathInjection::FnmHook {
+                file: PathBuf::from("/home/u/.zshrc"),
+                line: "l".into(),
+            }],
+        );
+        assert!(has_fnm_hook(&with));
+        // ShellRc 注入不算 fnm 钩子
+        let without = state_with(
+            NodeSourceKind::UserFnm,
+            Some("/x"),
+            vec![PathInjection::ShellRc {
+                file: PathBuf::from("/home/u/.zshrc"),
+                line: "export PATH=...".into(),
+            }],
+        );
+        assert!(!has_fnm_hook(&without));
+    }
+
+    #[test]
+    fn preserved_hint_none_when_no_node_record() {
+        let s = State::default();
+        assert!(preserved_hint(&s).is_none());
+        assert!(preserved_summary(&s).is_none());
+    }
+
+    #[test]
+    fn preserved_summary_names_source_and_version() {
+        let bare = state_with(NodeSourceKind::UserBare, None, Vec::new());
+        let s = preserved_summary(&bare).unwrap();
+        assert!(s.contains("Node"), "summary: {s}");
+        assert!(s.contains("v24.19.0"), "summary 带版本: {s}");
+        let fnm = state_with(NodeSourceKind::UserFnm, Some("/fnm/x"), Vec::new());
+        assert!(preserved_summary(&fnm).unwrap().contains("fnm"));
     }
 }

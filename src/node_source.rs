@@ -133,7 +133,8 @@ fn resolve_installed(
 
 /// 当前用户家目录下的 fnm 默认数据目录(InstallFnm 的安装目标,与探测一致)。
 /// Windows 为 `%LOCALAPPDATA%\fnm`(imp 覆盖),unix 为 `~/.local/share/fnm`(mod.rs 共享定义)。
-fn fnm_default_home() -> Result<PathBuf, String> {
+/// uninstall 的「代装 fnm 手工移除指引」复用同一路径(工单 #23)。
+pub(crate) fn fnm_default_home() -> Result<PathBuf, String> {
     let home = std::env::home_dir().ok_or_else(|| "无法确定用户家目录(HOME 未设置)".to_string())?;
     Ok(platform::fnm_default_dir_impl(&home))
 }
