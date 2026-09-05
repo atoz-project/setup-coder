@@ -125,8 +125,12 @@ fn ensure_node(prefix: &Prefix, state: &mut State) -> Result<(), Box<dyn Error>>
         }
         println!("Node.js {} 安装完成", node.version());
     }
+    // 过渡占位(工单 #17):解析接缝(#15)尚未接线来源决策(#18/#19),
+    // 前缀内 Node 暂记为 UserBare 来源;最终来源接线后此处改为按决策结果落账。
     state.node = Some(NodeState {
+        source: crate::prefix::NodeSourceKind::UserBare,
         version: node.version().to_string(),
+        exe: Some(node.exe().to_path_buf()),
     });
     Ok(())
 }

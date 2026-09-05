@@ -106,6 +106,9 @@ fn describe_injection(injection: &PathInjection) -> String {
         PathInjection::WindowsUserPath { dir } => {
             format!("用户环境变量 Path 中的 {}", dir.display())
         }
+        PathInjection::FnmHook { file, .. } => {
+            format!("{} 中的 fnm 钩子行(setup-coder 注入)", file.display())
+        }
     }
 }
 
@@ -128,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    fn describe_injection_covers_both_kinds() {
+    fn describe_injection_covers_all_kinds() {
         let rc = describe_injection(&PathInjection::ShellRc {
             file: PathBuf::from("/home/u/.zshrc"),
             line: "export PATH=...".into(),
@@ -138,5 +141,12 @@ mod tests {
             dir: PathBuf::from(r"C:\Users\u\.setup-coder\bin"),
         });
         assert!(win.contains("Path"));
+        // fnm 钩子注入:描述须指向 rc 文件并标明是 fnm 钩子
+        let hook = describe_injection(&PathInjection::FnmHook {
+            file: PathBuf::from("/home/u/.zshrc"),
+            line: "eval \"$(fnm env --use-on-cd)\"".into(),
+        });
+        assert!(hook.contains(".zshrc"));
+        assert!(hook.contains("fnm"));
     }
 }
