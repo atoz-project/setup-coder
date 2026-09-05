@@ -5,7 +5,7 @@
 //! 管理器方案(nvm/fnm)→ 管理器布局下已装版本的 exe。Node 永不落前缀(ADR-0003,
 //! 工单 #22):全部四种方案都解析到用户机器上的 Node,不存在前缀保底路径。
 //!
-//! 契约(工单 #21):shim 以本接缝给出的选定 Node 绝对路径直接 exec Tool 入口 JS,
+//! 契约(工单 #21):JS 入口的 shim 以本接缝给出的选定 Node 绝对路径解释执行,
 //! 不再把任何 node 目录前置进 PATH(`platform::shim_content` / `write_shim` 的入参
 //! 即 `NodeSource::exe`)。
 

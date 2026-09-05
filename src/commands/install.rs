@@ -3,7 +3,8 @@
 //! 流水线:建前缀骨架 → 探测 Node 事实 → 纯决策 → 按方案执行
 //! (达标裸 Node 复用 #19;经已有 nvm/fnm 装下限版本 #20;无 Node 无管理器则新装 fnm
 //! 兜底 #22)→ 确保 git(Prerequisite,工单 #3)→ 复制 setup-coder 本体 → npm 装 Tool
-//! (注册表)→ 生成 shim(绝对路径 exec 选定 Node,无 PATH 前置,工单 #21)→ 冒烟
+//! (注册表)→ 生成 shim(JS 入口以绝对路径经选定 Node 解释,原生入口直接 exec;
+//! 无 PATH 前置,工单 #21)→ 冒烟
 //! (`--version`,Installed 定义)→ 注入 PATH → 写 state.json。重跑 = 修复/升级,幂等。
 
 use std::error::Error;

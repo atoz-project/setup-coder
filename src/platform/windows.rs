@@ -139,7 +139,9 @@ pub fn write_shim(
 ) -> io::Result<PathBuf> {
     fs::create_dir_all(bin_dir)?;
     let path = bin_dir.join(super::shim_file_name(bin));
-    fs::write(&path, super::shim_content(node_exe, tool_launcher, bin))?;
+    // 原生入口(claude-code 2.x 起)不经 Node,shim 直接执行;JS 入口照旧经 Node
+    let kind = super::tool_entry_kind(tool_launcher)?;
+    fs::write(&path, super::shim_content(node_exe, tool_launcher, bin, kind))?;
     Ok(path)
 }
 

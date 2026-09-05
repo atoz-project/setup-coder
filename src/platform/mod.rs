@@ -181,47 +181,107 @@ pub fn windows_path_remove(existing: &str, dir: &str) -> Option<String> {
     Some(kept.join(";"))
 }
 
-/// unix shim 内容(工单 #21 去劫持契约):不前置任何 node 目录进 PATH,
-/// 直接以选定 Node 的绝对路径解释执行 Tool 的真实入口 JS。
+/// Tool 入口形态,由入口文件头魔数判定(见 `tool_entry_kind`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolEntryKind {
+    /// 文本 JS 入口:shim 以选定 Node 的绝对路径解释执行(工单 #21 契约)。
+    Js,
+    /// 原生可执行(ELF/PE/Mach-O):shim 直接 exec——原生二进制不依赖 Node;
+    /// `node <二进制>` 会被 Node 当模块加载而失败(claude-code 2.x 起 bin 即
+    /// 原生单文件,Linux 上名为 `bin/claude.exe` 的 215MB ELF,实测)。
+    Native,
+}
+
+/// 嗅探 Tool 入口形态:读文件头魔数,ELF / PE(`MZ`)/ Mach-O(细/胖)→ Native;
+/// 其余(shebang 脚本、无 shebang 的裸 JS)→ Js(与既有行为一致)。
+pub fn tool_entry_kind(entry: &Path) -> io::Result<ToolEntryKind> {
+    let mut f = fs::File::open(entry)?;
+    let mut magic = [0u8; 4];
+    let n = io::Read::read(&mut f, &mut magic)?;
+    let m = &magic[..n];
+    const MACHO_MAGICS: &[&[u8]] = &[
+        &[0xfe, 0xed, 0xfa, 0xce], // 32-bit
+        &[0xfe, 0xed, 0xfa, 0xcf], // 64-bit
+        &[0xce, 0xfa, 0xed, 0xfe], // 32-bit 反序
+        &[0xcf, 0xfa, 0xed, 0xfe], // 64-bit 反序
+        &[0xca, 0xfe, 0xba, 0xbe], // fat(universal)
+        &[0xbe, 0xba, 0xfe, 0xca], // fat 反序
+    ];
+    if m.starts_with(&[0x7f, b'E', b'L', b'F'])
+        || m.starts_with(b"MZ")
+        || MACHO_MAGICS.iter().any(|magic| m.starts_with(magic))
+    {
+        Ok(ToolEntryKind::Native)
+    } else {
+        Ok(ToolEntryKind::Js)
+    }
+}
+
+/// unix shim 内容(工单 #21 去劫持契约):不前置任何 node 目录进 PATH。
+/// JS 入口以选定 Node 的绝对路径解释执行;原生入口直接 exec(不经过 Node)。
 ///
-/// `tool_launcher` 已由 `tool_launcher()` canonicalize 为包内入口 JS 的绝对路径
+/// `tool_launcher` 已由 `tool_launcher()` canonicalize 为包内入口的绝对路径
 /// (npm 全局 bin 是相对 symlink,node 以参数打开时按 cwd 解析会断链);
-/// node 以显式参数打开入口 JS,shebang 完全不生效,启动链路对 PATH 零依赖。
+/// JS 入口由 node 以显式参数打开,shebang 完全不生效,启动链路对 PATH 零依赖。
 /// 重跑覆盖旧形态 shim。
 #[cfg(any(unix, test))]
-fn unix_shim_content(node_exe: &Path, tool_launcher: &Path, bin: &str) -> String {
+fn unix_shim_content(
+    node_exe: &Path,
+    tool_launcher: &Path,
+    bin: &str,
+    kind: ToolEntryKind,
+) -> String {
+    let exec_line = match kind {
+        ToolEntryKind::Js => format!(
+            "exec \"{}\" \"{}\" \"$@\"",
+            node_exe.display(),
+            tool_launcher.display()
+        ),
+        ToolEntryKind::Native => format!("exec \"{}\" \"$@\"", tool_launcher.display()),
+    };
     format!(
         "#!/bin/sh\n\
          # setup-coder shim: {bin}(由 install 生成,重跑覆盖)\n\
-         exec \"{}\" \"{}\" \"$@\"\n",
-        node_exe.display(),
-        tool_launcher.display(),
+         {exec_line}\n"
     )
 }
 
-/// Windows shim 内容(.cmd,工单 #21 去劫持契约):不前置任何 node 目录进 PATH,
-/// 以选定 Node 的绝对路径解释执行包内入口 JS。
+/// Windows shim 内容(.cmd,工单 #21 去劫持契约):不前置任何 node 目录进 PATH。
+/// JS 入口以选定 Node 的绝对路径解释执行;原生入口(PE)直接执行,不经过 Node。
 ///
 /// 无法沿用 unix 的「exec npm bin」形态:全局 bin 的 `<bin>.cmd` 内部按
 /// `"%~dp0\node.exe"` 硬编码找 node(期望 node 与 npm 全局 bin 同目录),且带
-/// `%NODE_EXE%` 劫持分支——两条路都不可接受,故改为直接指向包内入口 JS。
+/// `%NODE_EXE%` 劫持分支——两条路都不可接受,故改为直接指向包内入口。
 #[cfg(any(windows, test))]
-fn windows_shim_content(node_exe: &Path, tool_entry_js: &Path, bin: &str) -> String {
+fn windows_shim_content(
+    node_exe: &Path,
+    tool_entry_js: &Path,
+    bin: &str,
+    kind: ToolEntryKind,
+) -> String {
+    let exec_line = match kind {
+        ToolEntryKind::Js => format!(
+            "\"{}\" \"{}\" %*",
+            node_exe.display(),
+            tool_entry_js.display()
+        ),
+        ToolEntryKind::Native => format!("\"{}\" %*", tool_entry_js.display()),
+    };
     format!(
         "@echo off\r\n\
          rem setup-coder shim: {bin}(由 install 生成,重跑覆盖)\r\n\
-         \"{}\" \"{}\" %*\r\n\
-         exit /b %errorlevel%\r\n",
-        node_exe.display(),
-        tool_entry_js.display(),
+         {exec_line}\r\n\
+         exit /b %errorlevel%\r\n"
     )
 }
 
-/// unix 的 shim 目标:npm 全局 bin 里 Tool 启动器解析到的真实入口 JS 绝对路径。
+/// unix 的 shim 目标:npm 全局 bin 里 Tool 启动器解析到的真实入口绝对路径。
 ///
-/// `<npm_bin_dir>/<bin>` 是指向包内入口 JS 的**相对** symlink(如
-/// `../lib/node_modules/@openai/codex/bin/codex.js`);node 以参数打开时相对进程 cwd
-/// 解析,会断链,故此处 canonicalize 为绝对路径。npm bin 缺失/断链时报中文错。
+/// `<npm_bin_dir>/<bin>` 是指向包内入口的**相对** symlink(如
+/// `../lib/node_modules/@openai/codex/bin/codex.js`;入口可能是 JS,也可能是
+/// claude-code 2.x 起的原生二进制,由 `tool_entry_kind` 嗅探区分);node 以参数
+/// 打开时相对进程 cwd 解析,会断链,故此处 canonicalize 为绝对路径。
+/// npm bin 缺失/断链时报中文错。
 #[cfg(unix)]
 pub fn tool_launcher(npm_bin_dir: &Path, bin: &str) -> io::Result<PathBuf> {
     let launcher = npm_bin_dir.join(bin);
@@ -233,7 +293,7 @@ pub fn tool_launcher(npm_bin_dir: &Path, bin: &str) -> io::Result<PathBuf> {
     })
 }
 
-/// Windows 的 shim 目标:包内入口 JS 的绝对路径。
+/// Windows 的 shim 目标:包内入口的绝对路径(JS 或原生 PE,由 `tool_entry_kind` 嗅探)。
 ///
 /// 从 npm 全局 bin 的无扩展名 shell 启动器(纯文本,首行 shebang)解析出
 /// symlink 目标(Pacote 写的相对路径,如 `../lib/node_modules/<pkg>/cli.js`),
@@ -257,7 +317,7 @@ pub fn tool_launcher(npm_bin_dir: &Path, bin: &str) -> io::Result<PathBuf> {
         io::Error::new(
             e.kind(),
             format!(
-                "解析 Tool 入口 JS 失败:{}:{e}",
+                "解析 Tool 入口失败:{}:{e}",
                 npm_bin_dir.join(&target).display()
             ),
         )
@@ -265,19 +325,20 @@ pub fn tool_launcher(npm_bin_dir: &Path, bin: &str) -> io::Result<PathBuf> {
     Ok(entry)
 }
 
-/// 解析 npm 全局 bin 的 sh 启动器文本:shebang + `exec node "<目标>" "$@"` 单行。
+/// 解析 npm 全局 bin 的 sh 启动器文本:shebang + 一行 exec。
 /// Pacote 在 Windows 上把 symlink 目标(相对路径)落为这样的文本文件。
+/// 两种形态:JS 入口 `exec node "<目标>" "$@"`;原生入口(bin-links 对无
+/// shebang 的目标不再经 node)`exec "<目标>" "$@"`。这里只解目标路径,
+/// 是否经 Node 由 `tool_entry_kind` 对解出的入口文件做魔数嗅探决定。
 #[cfg(any(windows, test))]
 fn sh_launcher_target(text: &str) -> Option<PathBuf> {
     let line = text.lines().nth(1)?.trim();
-    let target = line
-        .strip_prefix("exec ")?
-        .trim_start()
-        .strip_prefix("node")?
-        .trim_start()
-        .strip_prefix('"')?
-        .split('"')
-        .next()?;
+    let rest = line.strip_prefix("exec ")?.trim_start();
+    let rest = match rest.strip_prefix("node") {
+        Some(after) if after.trim_start().starts_with('"') => after.trim_start(),
+        _ => rest,
+    };
+    let target = rest.strip_prefix('"')?.split('"').next()?;
     if target.is_empty() {
         return None;
     }
@@ -286,16 +347,22 @@ fn sh_launcher_target(text: &str) -> Option<PathBuf> {
 
 /// 当前平台的 shim 内容(供薄接缝落盘与单测断言)。
 ///
-/// 契约(工单 #21):shim 以选定 Node 的绝对路径 exec 前缀内 Tool 的入口 JS,
-/// 不向 PATH 前置任何 node 目录;setup-coder 唯一注入 PATH 的条目仍只是它自己的 bin/。
-pub fn shim_content(node_exe: &Path, tool_launcher: &Path, bin: &str) -> String {
+/// 契约(工单 #21):JS 入口由 shim 以选定 Node 的绝对路径解释执行,不向 PATH
+/// 前置任何 node 目录;原生入口(ToolEntryKind::Native)由 shim 直接 exec——
+/// 原生二进制不依赖 Node。setup-coder 唯一注入 PATH 的条目仍只是它自己的 bin/。
+pub fn shim_content(
+    node_exe: &Path,
+    tool_launcher: &Path,
+    bin: &str,
+    kind: ToolEntryKind,
+) -> String {
     #[cfg(windows)]
     {
-        windows_shim_content(node_exe, tool_launcher, bin)
+        windows_shim_content(node_exe, tool_launcher, bin, kind)
     }
     #[cfg(unix)]
     {
-        unix_shim_content(node_exe, tool_launcher, bin)
+        unix_shim_content(node_exe, tool_launcher, bin, kind)
     }
 }
 
@@ -1153,7 +1220,9 @@ pub(super) fn write_shim_impl(
 
     fs::create_dir_all(bin_dir)?;
     let path = bin_dir.join(shim_file_name(bin));
-    fs::write(&path, shim_content(node_exe, tool_launcher, bin))?;
+    // 原生入口(claude-code 2.x 起)不经 Node,shim 直接 exec;JS 入口照旧经 Node
+    let kind = tool_entry_kind(tool_launcher)?;
+    fs::write(&path, shim_content(node_exe, tool_launcher, bin, kind))?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
     Ok(path)
 }
@@ -1397,19 +1466,39 @@ mod tests {
         assert!(!merged2.contains(";;"));
     }
 
-    /// 工单 #21 去劫持契约:含选定 Node 绝对路径;以它 exec 前缀下包内真实入口 JS
-    /// (tool_launcher 已 canonicalize 为绝对路径);不含任何 PATH 前置。
+    /// 工单 #21 去劫持契约:JS 入口含选定 Node 绝对路径;以它 exec 前缀下包内真实
+    /// 入口 JS(tool_launcher 已 canonicalize 为绝对路径);不含任何 PATH 前置。
     #[test]
     fn unix_shim_execs_chosen_node_against_entry_js() {
         let s = unix_shim_content(
             Path::new("/opt/homebrew/opt/node@22/bin/node"),
             Path::new("/x/.setup-coder/npm/lib/node_modules/@openai/codex/bin/codex.js"),
             "codex",
+            ToolEntryKind::Js,
         );
         assert!(s.starts_with("#!/bin/sh"));
         assert!(s.contains(
             "exec \"/opt/homebrew/opt/node@22/bin/node\" \"/x/.setup-coder/npm/lib/node_modules/@openai/codex/bin/codex.js\" \"$@\""
         ));
+        assert!(!s.contains("export PATH"), "shim 不得前置 node 目录:{s}");
+    }
+
+    /// 原生入口(claude-code 2.x 起,bin 即 ELF/Mach-O 单文件):shim 直接 exec 入口,
+    /// 不经过 Node——`node <二进制>` 会被 Node 当模块加载而失败(hiclaw 实测
+    /// ERR_UNKNOWN_FILE_EXTENSION)。原生二进制自身不依赖 Node,无去劫持问题。
+    #[test]
+    fn unix_shim_execs_native_entry_directly() {
+        let s = unix_shim_content(
+            Path::new("/opt/homebrew/opt/node@22/bin/node"),
+            Path::new("/x/.setup-coder/npm/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"),
+            "claude",
+            ToolEntryKind::Native,
+        );
+        assert!(s.starts_with("#!/bin/sh"));
+        assert!(s.contains(
+            "exec \"/x/.setup-coder/npm/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe\" \"$@\""
+        ));
+        assert!(!s.contains("node@22"), "原生 shim 不得引用 Node:{s}");
         assert!(!s.contains("export PATH"), "shim 不得前置 node 目录:{s}");
     }
 
@@ -1424,14 +1513,15 @@ mod tests {
         }
     }
 
-    /// 工单 #21 去劫持契约(.cmd):含选定 Node 绝对路径;以它执行包内入口 JS;
-    /// 不含任何 PATH 变更。
+    /// 工单 #21 去劫持契约(.cmd):JS 入口含选定 Node 绝对路径;以它执行包内入口
+    /// JS;不含任何 PATH 变更。
     #[test]
     fn windows_shim_execs_chosen_node_against_entry_js() {
         let s = windows_shim_content(
             Path::new(r"C:\Users\u\fnm\node-versions\v22.19.0\installation\node.exe"),
             Path::new(r"C:\Users\u\.setup-coder\npm\node_modules\@openai\codex\bin\codex.js"),
             "codex",
+            ToolEntryKind::Js,
         );
         assert!(s.starts_with("@echo off"));
         assert!(s.contains(
@@ -1439,6 +1529,50 @@ mod tests {
         ));
         assert!(s.contains("exit /b %errorlevel%"));
         assert!(!s.contains("set \"PATH="), "shim 不得前置 node 目录:{s}");
+    }
+
+    /// 原生 PE 入口(.cmd):shim 直接执行入口,不经过 node.exe。
+    #[test]
+    fn windows_shim_execs_native_entry_directly() {
+        let s = windows_shim_content(
+            Path::new(r"C:\Users\u\fnm\node-versions\v22.19.0\installation\node.exe"),
+            Path::new(r"C:\Users\u\.setup-coder\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe"),
+            "claude",
+            ToolEntryKind::Native,
+        );
+        assert!(s.starts_with("@echo off"));
+        assert!(s.contains(
+            r#""C:\Users\u\.setup-coder\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe" %*"#
+        ));
+        assert!(s.contains("exit /b %errorlevel%"));
+        assert!(!s.contains("fnm\\node-versions"), "原生 shim 不得引用 Node:{s}");
+    }
+
+    #[test]
+    fn tool_entry_kind_sniffs_binary_magic() {
+        let dir =
+            std::env::temp_dir().join(format!("setup-coder-test-entrykind-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let cases: &[(&str, &[u8], ToolEntryKind)] = &[
+            ("elf", b"\x7fELF\x02\x01\x01\x00rest", ToolEntryKind::Native),
+            ("pe", b"MZ\x90\x00rest", ToolEntryKind::Native),
+            ("macho64", b"\xfe\xed\xfa\xcfrest", ToolEntryKind::Native),
+            ("macho-fat", b"\xca\xfe\xba\xberest", ToolEntryKind::Native),
+            (
+                "js-shebang",
+                b"#!/usr/bin/env node\nconsole.log(1)\n",
+                ToolEntryKind::Js,
+            ),
+            ("js-bare", b"// entry\nconsole.log(1)\n", ToolEntryKind::Js),
+            ("empty", b"", ToolEntryKind::Js), // 空文件按 JS 处理(与既有行为一致)
+        ];
+        for (name, bytes, want) in cases {
+            let p = dir.join(name);
+            fs::write(&p, bytes).unwrap();
+            assert_eq!(tool_entry_kind(&p).unwrap(), *want, "case {name}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1452,9 +1586,19 @@ mod tests {
                 "../lib/node_modules/@openai/codex/bin/codex.js"
             ))
         );
+        // 原生入口(bin-links 对无 shebang 的目标):exec 行不带 node
+        let native =
+            "#!/bin/sh\nexec  \"../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe\" \"$@\"\n";
+        assert_eq!(
+            sh_launcher_target(native),
+            Some(PathBuf::from(
+                "../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+            ))
+        );
         // 非启动器内容 / 空目标 → None(由 tool_launcher 报中文错)
         assert_eq!(sh_launcher_target("garbage"), None);
         assert_eq!(sh_launcher_target("#!/bin/sh\nexec node \"\" \"$@\""), None);
+        assert_eq!(sh_launcher_target("#!/bin/sh\nexec \"\" \"$@\""), None);
     }
 
     /// unix tool_launcher:npm 全局 bin 是相对 symlink → canonicalize 为包内入口 JS 的
@@ -1485,6 +1629,52 @@ mod tests {
         // 缺失/断链 → 中文报错而非 panic
         assert!(tool_launcher(&bin_dir, "nonexistent").is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// write_shim_impl 接线:按入口魔数分流 shim 形态——原生入口(ELF)直接 exec
+    /// (不经 Node,hiclaw 实测 claude-code 2.x 的 `node claude.exe` 必败);JS 入口
+    /// 照旧经选定 Node。重跑同一 bin 换形态时覆盖旧 shim。
+    #[cfg(unix)]
+    #[test]
+    fn write_shim_impl_picks_exec_form_by_entry_magic() {
+        let dir =
+            std::env::temp_dir().join(format!("setup-coder-test-wshim-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let bin_dir = dir.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let node = dir.join("node/bin/node");
+        fs::create_dir_all(node.parent().unwrap()).unwrap();
+        fs::write(&node, "fake-node").unwrap();
+        let entry = dir.join("pkg/bin/tool-entry");
+        fs::create_dir_all(entry.parent().unwrap()).unwrap();
+
+        // JS 入口 → 经 Node 解释
+        fs::write(&entry, "#!/usr/bin/env node\nconsole.log('v1')\n").unwrap();
+        let shim = write_shim_impl(&bin_dir, &node, &entry, "tool").unwrap();
+        let s = fs::read_to_string(&shim).unwrap();
+        assert!(
+            s.contains(&format!(
+                "exec \"{}\" \"{}\" \"$@\"",
+                node.display(),
+                entry.display()
+            )),
+            "JS 入口 shim 应经 Node:{s}"
+        );
+
+        // 同名 bin 换原生入口(ELF 魔数)→ 直接 exec,不再引用 Node;重跑覆盖旧 shim
+        fs::write(&entry, b"\x7fELF\x02\x01\x01\x00fake-native").unwrap();
+        let shim2 = write_shim_impl(&bin_dir, &node, &entry, "tool").unwrap();
+        assert_eq!(shim2, shim, "同一 bin 重跑应覆盖同一 shim 路径");
+        let s2 = fs::read_to_string(&shim2).unwrap();
+        assert!(
+            s2.contains(&format!("exec \"{}\" \"$@\"", entry.display())),
+            "原生入口 shim 应直接 exec:{s2}"
+        );
+        assert!(
+            !s2.contains(&format!("\"{}\"", node.display())),
+            "原生 shim 不得引用 Node:{s2}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
