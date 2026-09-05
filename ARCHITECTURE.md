@@ -11,7 +11,8 @@
 ├── Cargo.toml              # 单 crate(bin),依赖最少化(ADR-0001)
 ├── src/
 │   ├── main.rs             # 入口:clap 解析,分发子命令
-│   ├── registry.rs         # Tool 静态注册表:名称 → npm 包名 → 校验命令(加工具 = 加一行)
+│   ├── registry.rs         # Tool 静态注册表:名称 → npm 包名 → 校验命令 → Node 下限(加工具 = 加一行)
+│   ├── node_plan.rs        # Node 来源决策层(纯函数,零 IO):facts → NodePlan(工单 #16)
 │   ├── prefix.rs           # 私有前缀布局的唯一真源(路径常量都从这里出)
 │   ├── net.rs              # 下载 + Mirror 容错链(OSS → Gitee → GitHub 加速)
 │   ├── commands/

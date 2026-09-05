@@ -13,7 +13,7 @@ _Avoid_: 软件、应用、agent
 _Avoid_: 插件系统、配置中心
 
 **Prerequisite(前置依赖)**:
-Tool 运行所需的第三方软件,目前是 Node.js 与 git。由本安装器负责装好。
+Tool 运行所需的第三方软件,目前是 Node.js 与 git。原则是优先复用机器上已有的,只在缺失或版本不达标时才新装;Node.js 的复用/安装优先级为 复用已有 nvm > 复用已有 fnm > 新装 fnm(三平台统一默认)。
 _Avoid_: 环境、runtime
 
 **Mirror(镜像源)**:
@@ -21,7 +21,7 @@ _Avoid_: 环境、runtime
 _Avoid_: 代理、翻墙
 
 **Private Prefix(私有前缀)**:
-安装器自有目录(`~/.setup-coder/`),Node.js 与所有 Tool 装在其中,不触碰用户已有的 node/npm/全局环境。卸载 = 删除此目录。
+安装器自有目录(`~/.setup-coder/`),装 Tool、Shim、cache 与 state.json;Node 与 npm 永不落此目录,也不进 PATH 劫持用户。卸载 = 删除此目录并按 state.json 回滚 rc 注入。
 _Avoid_: 全局安装、系统环境
 
 **Shim**:

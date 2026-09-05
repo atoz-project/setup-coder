@@ -7,7 +7,7 @@
 
 ## Worktree 约定
 
-需要 git worktree 时,建在当前编程工具同名的隐藏目录下:`.<工具>/worktree/<任务名>/`。例:Claude Code → `.claude/worktree/xxx/`,pi → `.pi/worktree/xxx/`。这些路径已 gitignore。
+需要 git worktree 时,建在 `.agents/worktree/<任务名>/` 下。该路径已 gitignore。
 
 ## Agent skills
 

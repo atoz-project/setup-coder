@@ -1,4 +1,3 @@
 /target
-.claude/worktree/
-.pi/worktree/
+.agents/worktree/
 ISSUES.md
