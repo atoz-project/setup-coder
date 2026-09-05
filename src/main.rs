@@ -4,6 +4,7 @@
 
 mod commands;
 mod net;
+mod node_plan;
 mod node_source;
 mod platform;
 mod prefix;

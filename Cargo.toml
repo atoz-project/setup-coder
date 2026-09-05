@@ -12,6 +12,8 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # state.json 读写(安装清单,uninstall/doctor 的依据)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Node engines 下限的版本表示与比较(注册表 + 决策层,纯逻辑)
+semver = "1"
 
 [target.'cfg(unix)'.dependencies]
 # Node tar.gz 解压(flate2 默认 miniz_oxide 后端,纯 Rust)
