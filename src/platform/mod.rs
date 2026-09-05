@@ -568,7 +568,7 @@ pub fn git_missing_hint() -> &'static str {
 //
 // 探测产出 NodeFacts(裸 Node / nvm / fnm 各自的有无、版本、路径),供决策层
 // (node_plan::decide)消费;执行原语(装 fnm / fnm 装 Node / 注入 shell 钩子)
-// 落实施工。本工单只落地接缝,尚未接线到 install(工单 #19+),故死代码豁免。
+// 落实施工。探测已接线到 install(工单 #19);执行原语随 #20/#22 接线,暂豁免死代码。
 // 平台分叉(Windows 注册表 / unix rc / where.exe)收敛在 imp,命令层不见 cfg。
 // ---------------------------------------------------------------------------
 
@@ -576,7 +576,6 @@ pub fn git_missing_hint() -> &'static str {
 ///
 /// 必须能识别「已装但未在当前 shell 生效」的安装(读安装痕迹与版本,而非仅看
 /// 当前 PATH):nvm 走默认目录 + rc 行,fnm 走数据目录 + 可执行文件。
-#[allow(dead_code)] // 未接线到 install(工单 #19+)
 pub fn detect_node_facts() -> crate::node_plan::NodeFacts {
     imp::detect_node_facts()
 }
