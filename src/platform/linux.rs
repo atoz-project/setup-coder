@@ -55,11 +55,11 @@ pub fn git_missing_hint() -> &'static str {
 
 pub fn write_shim(
     bin_dir: &Path,
-    node_bin_dir: &Path,
-    npm_bin_dir: &Path,
+    node_exe: &Path,
+    tool_launcher: &Path,
     bin: &str,
 ) -> io::Result<PathBuf> {
-    super::write_shim_impl(bin_dir, node_bin_dir, npm_bin_dir, bin)
+    super::write_shim_impl(bin_dir, node_exe, tool_launcher, bin)
 }
 
 pub fn install_self(bin_dir: &Path) -> io::Result<PathBuf> {

@@ -118,13 +118,13 @@ pub fn git_missing_hint() -> &'static str {
 
 pub fn write_shim(
     bin_dir: &Path,
-    node_bin_dir: &Path,
-    npm_bin_dir: &Path,
+    node_exe: &Path,
+    tool_launcher: &Path,
     bin: &str,
 ) -> io::Result<PathBuf> {
     fs::create_dir_all(bin_dir)?;
     let path = bin_dir.join(super::shim_file_name(bin));
-    fs::write(&path, super::shim_content(node_bin_dir, npm_bin_dir, bin))?;
+    fs::write(&path, super::shim_content(node_exe, tool_launcher, bin))?;
     Ok(path)
 }
 
