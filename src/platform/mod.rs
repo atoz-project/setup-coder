@@ -539,6 +539,8 @@ pub fn extract_node_archive(archive: &Path, dest_dir: &Path) -> io::Result<()> {
 pub fn rollback_injection(injection: &PathInjection) -> io::Result<bool> {
     match injection {
         PathInjection::ShellRc { file, line } => rollback_shell_rc(file, line),
+        // fnm 钩子与 PATH 行同为 rc 精确行注入,回滚语义逐字一致(工单 #17)
+        PathInjection::FnmHook { file, line } => rollback_shell_rc(file, line),
         // Windows 注入类型不会出现在本平台的安装清单里
         PathInjection::WindowsUserPath { .. } => Ok(false),
     }
