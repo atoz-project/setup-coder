@@ -994,19 +994,35 @@ pub(super) fn install_fnm_unix(
     println!("已从 Mirror 下载 fnm:{hit}");
 
     fs::create_dir_all(dest_dir)?;
-    let bytes = fs::read(&archive)?;
-    let cursor = io::Cursor::new(bytes);
-    let mut zip = zip::ZipArchive::new(cursor).map_err(|e| format!("fnm zip 损坏:{e}"))?;
-    let mut entry = zip
-        .by_name("fnm")
-        .map_err(|e| format!("fnm zip 中无 `fnm` 条目:{e}"))?;
-    let mut out = fs::File::create(&exe)?;
-    io::copy(&mut entry, &mut out)?;
+    extract_zip_entry(&archive, "fnm", &exe)?;
     fs::set_permissions(&exe, fs::Permissions::from_mode(0o755))?;
     if version_output_of(&exe).is_none() {
         return Err("fnm 解压后自检失败:`fnm --version` 未通过".into());
     }
     Ok(exe)
+}
+
+/// 从 zip 解出单个条目为 dest 文件。返回时写 fd 保证已关闭——这是契约,不是
+/// 顺带行为:调用者紧跟着会 spawn 解出的可执行文件做自检,而 Linux/macOS 内核
+/// 拒绝 exec 仍被(任何进程,含本进程自己)以写方式打开的可执行文件
+/// (execve → ETXTBSY;hiclaw 实机验收据此复现)。写句柄若活着离开本函数,
+/// 自检必败。
+#[cfg(unix)]
+fn extract_zip_entry(
+    archive: &Path,
+    entry_name: &str,
+    dest: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let bytes = fs::read(archive)?;
+    let mut zip =
+        zip::ZipArchive::new(io::Cursor::new(bytes)).map_err(|e| format!("fnm zip 损坏:{e}"))?;
+    let mut entry = zip
+        .by_name(entry_name)
+        .map_err(|e| format!("fnm zip 中无 `{entry_name}` 条目:{e}"))?;
+    let mut out = fs::File::create(dest)?;
+    io::copy(&mut entry, &mut out)?;
+    out.sync_all()?;
+    Ok(())
 }
 
 /// unix 共享:跑一条 fnm 子命令,按绝对路径调可执行(不依赖 PATH);非零退出带 stderr 报错。
@@ -1280,6 +1296,38 @@ mod tests {
             assert!(version_output_of(&bad).is_none());
             fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    /// 回归(hiclaw 实机验收):解出的可执行文件必须立即可 exec。若解出方把
+    /// 写 fd 活到调用方 spawn 时,内核 execve 拒绝(ETXTBSY),fnm 解压后自检
+    /// 必败——v0.2.0 的 install_fnm_unix 正是这样,`out` File 随函数作用域
+    /// 结束才关闭,晚于自检。extract_zip_entry 的契约是返回时写 fd 已关闭。
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_entry_leaves_exe_immediately_executable() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("setup-coder-test-zipex-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // 造 zip:单条目 `fnm`,内容是能响应 --version 的假 fnm
+        let mut w = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        w.start_file("fnm", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        w.write_all(b"#!/bin/sh\necho 'fnm 9.9.9 (fake)'\n").unwrap();
+        let archive = dir.join("fnm-linux.zip");
+        fs::write(&archive, w.finish().unwrap().into_inner()).unwrap();
+
+        let exe = dir.join("fnm");
+        extract_zip_entry(&archive, "fnm", &exe).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        // 与 install_fnm_unix 自检同一步:解出后立即 spawn 必须成功
+        assert_eq!(
+            version_output_of(&exe).as_deref(),
+            Some("fnm 9.9.9 (fake)")
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
