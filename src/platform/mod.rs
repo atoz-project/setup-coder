@@ -33,34 +33,6 @@ use windows as imp;
 // 纯逻辑(全平台可编译,单测覆盖)
 // ---------------------------------------------------------------------------
 
-/// Node 发行版目标后缀:`node-vX.Y.Z-<suffix>.<ext>`
-pub fn node_dist_suffix_for(os: &str, arch: &str) -> Result<&'static str, String> {
-    match (os, arch) {
-        ("macos", "aarch64") => Ok("darwin-arm64"),
-        ("macos", "x86_64") => Ok("darwin-x64"),
-        ("linux", "x86_64") => Ok("linux-x64"),
-        ("windows", "x86_64") => Ok("win-x64"),
-        _ => Err(format!("暂不支持的平台组合:{os}/{arch}")),
-    }
-}
-
-/// 当前平台的 Node 发行版目标后缀
-pub fn node_dist_suffix() -> Result<&'static str, String> {
-    node_dist_suffix_for(std::env::consts::OS, std::env::consts::ARCH)
-}
-
-/// Node 发行包扩展名(Windows 为 zip,其余 tar.gz)
-pub fn node_archive_ext_for(os: &str) -> &'static str {
-    match os {
-        "windows" => "zip",
-        _ => "tar.gz",
-    }
-}
-
-pub fn node_archive_ext() -> &'static str {
-    node_archive_ext_for(std::env::consts::OS)
-}
-
 /// Node 可执行文件相对其解压根目录的子目录(unix `bin/`,Windows 根目录)
 pub const fn node_bin_subdir() -> &'static str {
     if cfg!(windows) {
@@ -611,11 +583,6 @@ pub fn ensure_git(prefix: &Prefix) -> Result<GitOutcome, Box<dyn Error>> {
     imp::ensure_git(prefix)
 }
 
-/// 解压 Node 发行包到 `dest_dir`(剥掉顶层 `node-vX-…/` 一层)。
-pub fn extract_node_archive(archive: &Path, dest_dir: &Path) -> io::Result<()> {
-    imp::extract_node_archive(archive, dest_dir)
-}
-
 /// 按 state.json 记录精确回滚一条 PATH 注入(不做模糊匹配)。
 /// Ok(true) = 实际回滚了;Ok(false) = 对应内容已不存在(幂等,无需处理)。
 /// unix 两平台实现相同,直接收在此处;Windows 走注册表,分派 imp。
@@ -665,7 +632,7 @@ pub fn detect_node_facts() -> crate::node_plan::NodeFacts {
 
 /// 下载并安装 fnm 到 `dest_dir`,返回 fnm 可执行文件路径(分派 imp)。
 /// 经 net::fnm_urls 镜像容错链下载;幂等:目标已装且可用则直接复用。
-#[allow(dead_code)] // 未接线到 install(工单 #19+)
+
 pub fn install_fnm(cache_dir: &Path, dest_dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
     imp::install_fnm(cache_dir, dest_dir)
 }
@@ -680,10 +647,7 @@ pub fn fnm_install_and_default(fnm_exe: &Path, version: &str) -> Result<(), Box<
 /// 只装、只解析:不改 nvm 的 default alias,不劫持用户的默认 Node(ADR 决策)。
 /// 返回解析出的 `<node>` exe 绝对路径(nvm 布局,如 unix 的
 /// `<nvm_dir>/versions/node/vX.Y.Z/bin/node`)。
-pub fn nvm_install_and_resolve(
-    nvm_path: &Path,
-    version: &str,
-) -> Result<PathBuf, Box<dyn Error>> {
+pub fn nvm_install_and_resolve(nvm_path: &Path, version: &str) -> Result<PathBuf, Box<dyn Error>> {
     imp::nvm_install_and_resolve(nvm_path, version)
 }
 
@@ -727,8 +691,8 @@ pub enum ManagerKind {
 }
 
 /// 把 fnm 的 shell 钩子幂等注入用户 shell 配置文件(unix:各登录 rc;Windows:PowerShell
-/// profile)。重跑不产生重复行。unix 返回实际改动的注入记录(供 state.json 精确回滚)。
-#[allow(dead_code)] // 未接线到 install(工单 #19+)
+/// profile)。重跑不产生重复行。返回实际改动的 FnmHook 注入记录(供 state.json 精确
+/// 回滚——代装 fnm 与 PATH 行分两类记录,uninstall 按记录逐字回滚)。
 pub fn inject_fnm_hook() -> io::Result<Vec<PathInjection>> {
     imp::inject_fnm_hook()
 }
@@ -744,7 +708,6 @@ pub fn fnm_exe_path(fnm_path: &Path) -> PathBuf {
 }
 
 /// 当前平台的 fnm 发行资产后缀(fnm-<suffix>.zip)
-#[allow(dead_code)] // 未接线到 install(工单 #19+)
 pub fn fnm_asset_suffix() -> Result<&'static str, String> {
     fnm_asset_suffix_for(std::env::consts::OS, std::env::consts::ARCH)
 }
@@ -759,7 +722,6 @@ pub fn parse_node_version(out: &str) -> Option<semver::Version> {
 }
 
 /// 从 `fnm --version` 输出解析版本(如 "fnm 1.39.0" / "1.39.0");无法解析返回 None。
-#[allow(dead_code)] // fnm 版本串解析,供 doctor/执行层自检,未接线(工单 #19+)
 pub fn parse_fnm_version(out: &str) -> Option<semver::Version> {
     parse_semver_like(out.trim())
 }
@@ -837,11 +799,17 @@ pub fn nvm_default_version(nvm_dir: &Path) -> Option<String> {
     }
 }
 
-/// fnm 默认安装/数据目录(unix 为 `~/.local/share/fnm`;Windows 由 imp 覆盖为
-/// `%LOCALAPPDATA%\fnm`)。nvm/fnm 探测与 install_fnm 的落盘目录共用此定义。
+/// fnm 默认安装/数据目录:nvm/fnm 探测、install_fnm 落盘与 InstallFnm 解析共用。
+/// unix 为 `~/.local/share/fnm`;Windows 分派 imp 为 `%LOCALAPPDATA%\fnm`。
 #[cfg(unix)]
-pub fn fnm_default_dir(home: &Path) -> PathBuf {
+pub fn fnm_default_dir_impl(home: &Path) -> PathBuf {
     home.join(".local").join("share").join("fnm")
+}
+
+/// Windows:分派 imp(`%LOCALAPPDATA%\fnm`,与 detect/install_fnm 同一目录)
+#[cfg(windows)]
+pub fn fnm_default_dir_impl(home: &Path) -> PathBuf {
+    imp::fnm_default_dir(home)
 }
 
 /// fnm 的 unix shell rc 钩子行(写入登录 rc,幂等判断以这行为准)。
@@ -958,7 +926,7 @@ fn detect_fnm_unix(
         let version = current_fnm_node_version(&exe).unwrap_or(semver::Version::new(0, 0, 0));
         return Some((version, exe));
     }
-    let dir = fnm_default_dir(home);
+    let dir = fnm_default_dir_impl(home);
     let rc_hint = rc_contents.iter().any(|c| fnm_hook_present(c));
     if !dir.is_dir() && !rc_hint {
         return None;
@@ -998,7 +966,7 @@ pub(super) fn inject_fnm_hook_via_shell_rc(
         };
         if let Some(new) = shell_rc_append(&existing, &line) {
             fs::write(&file, new)?;
-            injections.push(PathInjection::ShellRc {
+            injections.push(PathInjection::FnmHook {
                 file,
                 line: line.clone(),
             });
@@ -1205,57 +1173,9 @@ pub(super) fn install_self_impl(bin_dir: &Path) -> io::Result<PathBuf> {
     Ok(dest)
 }
 
-/// unix:tar.gz 解压,剥掉顶层目录一层。
-#[cfg(unix)]
-pub(super) fn extract_node_archive_impl(archive: &Path, dest_dir: &Path) -> io::Result<()> {
-    let file = fs::File::open(archive)?;
-    let decoder = flate2::read::GzDecoder::new(file);
-    let mut tar = tar::Archive::new(decoder);
-    fs::create_dir_all(dest_dir)?;
-    for entry in tar.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?;
-        let stripped: PathBuf = path.components().skip(1).collect();
-        if stripped.as_os_str().is_empty() {
-            continue;
-        }
-        entry.unpack(dest_dir.join(stripped))?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn node_dist_suffix_covers_ci_targets() {
-        assert_eq!(
-            node_dist_suffix_for("macos", "aarch64").unwrap(),
-            "darwin-arm64"
-        );
-        assert_eq!(
-            node_dist_suffix_for("macos", "x86_64").unwrap(),
-            "darwin-x64"
-        );
-        assert_eq!(
-            node_dist_suffix_for("linux", "x86_64").unwrap(),
-            "linux-x64"
-        );
-        assert_eq!(
-            node_dist_suffix_for("windows", "x86_64").unwrap(),
-            "win-x64"
-        );
-        assert!(node_dist_suffix_for("linux", "aarch64").is_err());
-        assert!(node_dist_suffix_for("freebsd", "x86_64").is_err());
-    }
-
-    #[test]
-    fn node_archive_ext_by_os() {
-        assert_eq!(node_archive_ext_for("windows"), "zip");
-        assert_eq!(node_archive_ext_for("macos"), "tar.gz");
-        assert_eq!(node_archive_ext_for("linux"), "tar.gz");
-    }
 
     #[test]
     fn shell_rc_remove_deletes_only_the_recorded_line() {
@@ -1771,7 +1691,7 @@ mod tests {
     #[test]
     fn fnm_default_dir_is_under_home() {
         assert_eq!(
-            fnm_default_dir(Path::new("/home/u")),
+            fnm_default_dir_impl(Path::new("/home/u")),
             Path::new("/home/u/.local/share/fnm")
         );
     }

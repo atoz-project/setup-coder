@@ -10,6 +10,54 @@ mod platform;
 mod prefix;
 mod registry;
 
+/// 测试共用:`std::env::home_dir` 的全局变量接缝(HOME / USERPROFILE)在
+/// 多线程测试里互相干扰,凡临时改家目录的测试经此守卫串行化。
+#[cfg(test)]
+mod test_util {
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// 把 HOME(与 Windows 的 USERPROFILE)临时指到 `dir`,随守卫析构恢复。
+    /// 持有进程级互斥锁:同进程所有 ScopedHome 测试串行执行。
+    pub struct ScopedHome {
+        _lock: MutexGuard<'static, ()>,
+        home: Option<OsString>,
+        userprofile: Option<OsString>,
+    }
+
+    impl ScopedHome {
+        pub fn set(dir: &Path) -> Self {
+            static LOCK: Mutex<()> = Mutex::new(());
+            let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let home = std::env::var_os("HOME");
+            let userprofile = std::env::var_os("USERPROFILE");
+            unsafe {
+                std::env::set_var("HOME", dir);
+                std::env::set_var("USERPROFILE", dir);
+            }
+            Self {
+                _lock: lock,
+                home,
+                userprofile,
+            }
+        }
+    }
+
+    impl Drop for ScopedHome {
+        fn drop(&mut self) {
+            match &self.home {
+                Some(v) => unsafe { std::env::set_var("HOME", v) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+            match &self.userprofile {
+                Some(v) => unsafe { std::env::set_var("USERPROFILE", v) },
+                None => unsafe { std::env::remove_var("USERPROFILE") },
+            }
+        }
+    }
+}
+
 use clap::{CommandFactory, Parser, Subcommand};
 
 /// 中文帮助模板(裸跑与各子命令 `--help` 共用)
