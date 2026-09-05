@@ -79,8 +79,17 @@ fn prefix_node(prefix: &Prefix) -> NodeSource {
     }
 }
 
-/// 按决策结果解析选定 Node:复用裸 Node → 指向用户机器上的绝对路径;
-/// 其余方案(尚未实现,#20/#22)→ 保底前缀内 Node。
+/// 管理器来源:指向管理器安装目录下已解析的 node exe(版本已验证为已装达标)。
+fn managed_node(exe: PathBuf, floor: &semver::Version, kind: NodeSourceKind) -> NodeSource {
+    NodeSource {
+        exe,
+        version: format!("v{floor}"),
+        kind,
+    }
+}
+
+/// 按决策结果解析选定 Node:复用裸 Node / 管理器(nvm/fnm)装好的 Node →
+/// 指向用户机器上的绝对路径;其余方案(尚未实现,#22)→ 保底前缀内 Node。
 pub fn for_plan(prefix: &Prefix, plan: &NodePlan) -> NodeSource {
     match plan {
         NodePlan::ReuseBareNode { path, .. } => {
@@ -91,6 +100,19 @@ pub fn for_plan(prefix: &Prefix, plan: &NodePlan) -> NodeSource {
                 kind: NodeSourceKind::UserBare,
             }
         }
+        // UseNvm/UseFnm:执行层(decide_node_with)已装好并验证过该版本,这里只做布局推导
+        NodePlan::UseNvm { path, version } => managed_node(
+            platform::resolve_manager_node(path, &version.to_string(), platform::ManagerKind::Nvm)
+                .expect("UseNvm 执行后管理器内必有该版本 Node"),
+            version,
+            NodeSourceKind::UserNvm,
+        ),
+        NodePlan::UseFnm { path, version } => managed_node(
+            platform::resolve_manager_node(path, &version.to_string(), platform::ManagerKind::Fnm)
+                .expect("UseFnm 执行后管理器内必有该版本 Node"),
+            version,
+            NodeSourceKind::UserFnm,
+        ),
         _ => prefix_node(prefix),
     }
 }
@@ -112,6 +134,7 @@ pub fn from_state(prefix: &Prefix, state: &crate::prefix::State) -> NodeSource {
 mod tests {
     use super::*;
     use semver::Version;
+    use std::fs;
 
     #[test]
     fn prefix_fallback_resolves_prefix_node_with_fixed_lts() {
@@ -153,28 +176,63 @@ mod tests {
         );
     }
 
+    /// 决策 → NodeSource 接线(工单 #20):UseNvm/UseFnm 指向管理器目录下
+    /// 已装版本的 node exe 绝对路径;kind 分别为 user_nvm / user_fnm。
+    /// 用桩 exe(sh 脚本)占位,不依赖真实 nvm/fnm。
+    #[cfg(unix)]
     #[test]
-    fn non_reuse_plans_fall_back_to_prefix_node() {
+    fn manager_plans_resolve_to_installed_node() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "setup-coder-test-mgr-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
         let prefix = Prefix::new(PathBuf::from("/x/.setup-coder"));
-        for plan in [
-            NodePlan::UseNvm {
-                path: PathBuf::from("/home/u/.nvm"),
-                version: Version::new(22, 19, 0),
-            },
-            NodePlan::UseFnm {
-                path: PathBuf::from("/home/u/.local/share/fnm"),
-                version: Version::new(22, 19, 0),
-            },
-            NodePlan::InstallFnm {
-                version: Version::new(22, 19, 0),
-            },
-        ] {
-            assert_eq!(
-                for_plan(&prefix, &plan),
-                prefix_node(&prefix),
-                "{plan:?} 尚未实现,应保底前缀内 Node"
-            );
+        let version = Version::new(22, 19, 0);
+        // nvm 布局:<dir>/versions/node/v22.19.0/bin/node;fnm 布局:node-versions/v22.19.0/installation/bin/node
+        let nvm_dir = root.join("nvm");
+        let fnm_dir = root.join("fnm");
+        let nvm_exe = nvm_dir
+            .join("versions/node/v22.19.0/bin/node");
+        let fnm_exe = fnm_dir.join("node-versions/v22.19.0/installation/bin/node");
+        for exe in [&nvm_exe, &fnm_exe] {
+            fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            fs::write(exe, "#!/bin/sh\necho 'v22.19.0'\n").unwrap();
+            fs::set_permissions(exe, fs::Permissions::from_mode(0o755)).unwrap();
         }
+        let nvm = for_plan(
+            &prefix,
+            &NodePlan::UseNvm {
+                path: nvm_dir.clone(),
+                version: version.clone(),
+            },
+        );
+        assert_eq!(nvm.exe(), nvm_exe.as_path());
+        assert_eq!(nvm.version(), "v22.19.0");
+        assert_eq!(nvm.kind(), NodeSourceKind::UserNvm);
+
+        let fnm = for_plan(
+            &prefix,
+            &NodePlan::UseFnm {
+                path: fnm_dir.clone(),
+                version,
+            },
+        );
+        assert_eq!(fnm.exe(), fnm_exe.as_path());
+        assert_eq!(fnm.version(), "v22.19.0");
+        assert_eq!(fnm.kind(), NodeSourceKind::UserFnm);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// InstallFnm(#22)尚未实现 → 保底前缀内 Node
+    #[test]
+    fn install_fnm_falls_back_to_prefix_node() {
+        let prefix = Prefix::new(PathBuf::from("/x/.setup-coder"));
+        let plan = NodePlan::InstallFnm {
+            version: Version::new(22, 19, 0),
+        };
+        assert_eq!(for_plan(&prefix, &plan), prefix_node(&prefix));
     }
 
     #[test]

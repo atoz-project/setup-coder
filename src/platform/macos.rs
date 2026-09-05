@@ -16,9 +16,16 @@ pub fn ensure_path(bin_dir: &Path) -> io::Result<Vec<PathInjection>> {
 }
 
 /// 探测 Node 来源事实:与 ensure_path 同一份登录 rc 清单(覆盖「已装未 source」)
-#[allow(dead_code)] // 未接线到 install(工单 #19+)
 pub fn detect_node_facts() -> crate::node_plan::NodeFacts {
     super::detect_node_facts_impl(RC_FILES)
+}
+
+/// 经已有 nvm 装 Node 并解析 exe 路径(共享 unix 实现:source nvm.sh 后 nvm install/which)
+pub fn nvm_install_and_resolve(
+    nvm_dir: &Path,
+    version: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    super::nvm_install_and_resolve_unix(nvm_dir, version)
 }
 
 /// 下载安装 fnm(共享 unix 实现:华为云 → gh-proxy → GitHub 容错链,解出单文件 fnm)
@@ -28,7 +35,6 @@ pub fn install_fnm(cache_dir: &Path, dest_dir: &Path) -> Result<PathBuf, Box<dyn
 }
 
 /// 用 fnm 装指定 Node 版本并设为默认(共享 unix 实现)
-#[allow(dead_code)] // 未接线到 install(工单 #19+)
 pub fn fnm_install_and_default(fnm_exe: &Path, version: &str) -> Result<(), Box<dyn Error>> {
     super::fnm_install_and_default_unix(fnm_exe, version)
 }

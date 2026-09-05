@@ -588,9 +588,59 @@ pub fn install_fnm(cache_dir: &Path, dest_dir: &Path) -> Result<PathBuf, Box<dyn
 }
 
 /// 用给定 fnm 装指定 Node 版本并设为默认:`fnm install <version>` + `fnm default <version>`。
-#[allow(dead_code)] // 未接线到 install(工单 #19+)
 pub fn fnm_install_and_default(fnm_exe: &Path, version: &str) -> Result<(), Box<dyn Error>> {
     imp::fnm_install_and_default(fnm_exe, version)
+}
+
+/// 经已有 nvm 安装指定 Node 版本并解析出 node 可执行文件绝对路径(分派 imp)。
+///
+/// 只装、只解析:不改 nvm 的 default alias,不劫持用户的默认 Node(ADR 决策)。
+/// 返回解析出的 `<node>` exe 绝对路径(nvm 布局,如 unix 的
+/// `<nvm_dir>/versions/node/vX.Y.Z/bin/node`)。
+pub fn nvm_install_and_resolve(
+    nvm_path: &Path,
+    version: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    imp::nvm_install_and_resolve(nvm_path, version)
+}
+
+/// 定位某管理器安装目录下指定版本的 Node,并验证 exe 可执行、版本一致(全平台纯逻辑)。
+///
+/// - nvm(unix 布局):`<dir>/versions/node/<vX.Y.Z>/bin/node`;
+/// - fnm:`<dir>/node-versions/<vX.Y.Z>/installation/bin/node`;
+/// - nvm-windows:`<dir>/<vX.Y.Z>/node.exe`(版本目录直接在根下,无 versions 包裹)。
+///
+/// 幂等复用与共用语义都由它承载:命中即「该管理器已装过该版本,无需再装」。
+pub fn resolve_manager_node(dir: &Path, version: &str, kind: ManagerKind) -> Option<PathBuf> {
+    let v = format!("v{}", version.trim().trim_start_matches('v'));
+    let exe = if cfg!(windows) && kind == ManagerKind::Nvm {
+        // nvm-windows:NVM_HOME/vX.Y.Z/node.exe
+        dir.join(&v).join(exe_name("node"))
+    } else if kind == ManagerKind::Nvm {
+        dir.join("versions")
+            .join("node")
+            .join(&v)
+            .join(node_bin_subdir())
+            .join(exe_name("node"))
+    } else {
+        dir.join("node-versions")
+            .join(&v)
+            .join("installation")
+            .join(node_bin_subdir())
+            .join(exe_name("node"))
+    };
+    if version_output_of(&exe).as_deref() == Some(v.as_str()) {
+        Some(exe)
+    } else {
+        None
+    }
+}
+
+/// Node 版本管理器种类(解析管理器安装的 Node 布局用)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagerKind {
+    Nvm,
+    Fnm,
 }
 
 /// 把 fnm 的 shell 钩子幂等注入用户 shell 配置文件(unix:各登录 rc;Windows:PowerShell
@@ -598,6 +648,16 @@ pub fn fnm_install_and_default(fnm_exe: &Path, version: &str) -> Result<(), Box<
 #[allow(dead_code)] // 未接线到 install(工单 #19+)
 pub fn inject_fnm_hook() -> io::Result<Vec<PathInjection>> {
     imp::inject_fnm_hook()
+}
+
+/// fnm 可执行文件绝对路径:探测事实里的 path 可能是 fnm 数据目录(含 exe 自身),
+/// 也可能已是可执行文件;统一解析为可执行文件路径(工单 #20 执行层共用)。
+pub fn fnm_exe_path(fnm_path: &Path) -> PathBuf {
+    if fnm_path.is_file() {
+        fnm_path.to_path_buf()
+    } else {
+        fnm_path.join(exe_name("fnm"))
+    }
 }
 
 /// 当前平台的 fnm 发行资产后缀(fnm-<suffix>.zip)
@@ -915,6 +975,40 @@ pub(super) fn fnm_install_and_default_unix(
 ) -> Result<(), Box<dyn Error>> {
     run_fnm(fnm_exe, &["install", version])?;
     run_fnm(fnm_exe, &["default", version])
+}
+
+/// unix 共享:经已有 nvm 安装指定 Node 版本并解析 node exe 绝对路径(工单 #20)。
+///
+/// nvm 是 shell 函数而非二进制:必须在 `sh -c` 里 source `<nvm_dir>/nvm.sh` 后再调
+/// `nvm install` / `nvm which`。`nvm install` 对已装版本是幂等的(直接报已装);
+/// 装完后用 `nvm which <version>` 解析出 exe 绝对路径。全程不改用户的 default alias。
+#[cfg(unix)]
+pub(super) fn nvm_install_and_resolve_unix(
+    nvm_dir: &Path,
+    version: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let script = format!(
+        "export NVM_DIR=\"{}\"; . \"$NVM_DIR/nvm.sh\" && nvm install \"{}\" && nvm which \"{}\"",
+        nvm_dir.display(),
+        version,
+        version
+    );
+    let out = Command::new("sh").arg("-c").arg(&script).output()?;
+    if !out.status.success() {
+        return Err(format!(
+            "经 nvm({})安装 Node {} 失败:{}",
+            nvm_dir.display(),
+            version,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+        .into());
+    }
+    // `nvm which` 的输出在 stdout 末行(前面是 install 的输出)
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let Some(last) = stdout.lines().rev().find(|l| !l.trim().is_empty()) else {
+        return Err(format!("`nvm which {version}` 无输出,无法解析 node 路径").into());
+    };
+    Ok(PathBuf::from(last.trim()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1529,5 +1623,57 @@ mod tests {
             fnm_default_dir(Path::new("/home/u")),
             Path::new("/home/u/.local/share/fnm")
         );
+    }
+    /// resolve_manager_node(工单 #20):按管理器布局定位 node exe,验证版本匹配才命中;
+    /// 版本不符 / 缺失 → None(幂等复用判定的反例)。
+    #[cfg(unix)]
+    #[test]
+    fn resolve_manager_node_hits_only_matching_version() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("setup-coder-test-resolve-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        // nvm 布局
+        let nvm_dir = root.join("nvm");
+        let nvm_exe = nvm_dir.join("versions/node/v22.19.0/bin/node");
+        fs::create_dir_all(nvm_exe.parent().unwrap()).unwrap();
+        fs::write(&nvm_exe, "#!/bin/sh\necho 'v22.19.0'\n").unwrap();
+        fs::set_permissions(&nvm_exe, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            resolve_manager_node(&nvm_dir, "22.19.0", ManagerKind::Nvm).as_deref(),
+            Some(nvm_exe.as_path()),
+            "已装且版本匹配 → 命中"
+        );
+        // 版本不符(目录存在但版本串不匹配)→ None
+        assert!(resolve_manager_node(&nvm_dir, "22.19.1", ManagerKind::Nvm).is_none());
+        // fnm 布局
+        let fnm_dir = root.join("fnm");
+        let fnm_exe = fnm_dir.join("node-versions/v24.19.0/installation/bin/node");
+        fs::create_dir_all(fnm_exe.parent().unwrap()).unwrap();
+        fs::write(&fnm_exe, "#!/bin/sh\necho 'v24.19.0'\n").unwrap();
+        fs::set_permissions(&fnm_exe, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            resolve_manager_node(&fnm_dir, "24.19.0", ManagerKind::Fnm).as_deref(),
+            Some(fnm_exe.as_path())
+        );
+        assert!(resolve_manager_node(&fnm_dir, "20.0.0", ManagerKind::Fnm).is_none());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// fnm_exe_path(工单 #20):fnm 路径可能是数据目录(内含 fnm)或已是 exe;统一归一。
+    #[cfg(unix)]
+    #[test]
+    fn fnm_exe_path_normalizes_dir_or_exe() {
+        let root =
+            std::env::temp_dir().join(format!("setup-coder-test-fnmpath-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        // 数据目录(无 exe 文件)→ 拼上 exe_name
+        assert_eq!(fnm_exe_path(&root), root.join(exe_name("fnm")));
+        // 已是文件 → 原样返回
+        let exe = root.join(exe_name("fnm"));
+        fs::write(&exe, "#!/bin/sh\necho 1.0.0\n").unwrap();
+        assert_eq!(fnm_exe_path(&exe), exe);
+        fs::remove_dir_all(&root).unwrap();
     }
 }

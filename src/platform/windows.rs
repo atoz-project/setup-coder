@@ -227,7 +227,7 @@ fn fnm_default_dir_windows() -> Option<PathBuf> {
 /// 探测 Node 来源事实(Windows):裸 Node 走 PATH + `node --version`;
 /// nvm 走 NVM_DIR 环境变量 + `%APPDATA%\nvm`(nvm-windows);fnm 走 PATH +
 /// `%LOCALAPPDATA%\fnm` + PowerShell profile 钩子痕迹(覆盖「已装未 source」)。
-#[allow(dead_code)] // 未接线到 install(工单 #19+)
+
 pub fn detect_node_facts() -> crate::node_plan::NodeFacts {
     crate::node_plan::NodeFacts {
         bare_node: detect_bare_node_windows(),
@@ -326,13 +326,34 @@ pub fn install_fnm(cache_dir: &Path, dest_dir: &Path) -> Result<PathBuf, Box<dyn
 }
 
 /// 用 fnm 装指定 Node 版本并设为默认(Windows)。
-#[allow(dead_code)] // 未接线到 install(工单 #19+)
 pub fn fnm_install_and_default(fnm_exe: &Path, version: &str) -> Result<(), Box<dyn Error>> {
     run_fnm_windows(fnm_exe, &["install", version])?;
     run_fnm_windows(fnm_exe, &["default", version])
 }
 
-#[allow(dead_code)]
+/// 经 nvm-windows 安装指定 Node 版本并解析 node.exe 绝对路径(工单 #20)。
+///
+/// nvm-windows 是 `nvm.exe` 二进制(与 unix 的 shell 函数不同),直接按绝对路径调用。
+/// 只装、只解析,不 `nvm use`(不劫持用户当前切换);版本目录布局 NVM_HOME/vX.Y.Z/。
+pub fn nvm_install_and_resolve(
+    nvm_dir: &Path,
+    version: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let exe = nvm_dir.join(super::exe_name("nvm"));
+    let out = Command::new(&exe).args(["install", version]).output()?;
+    if !out.status.success() {
+        return Err(format!(
+            "经 nvm-windows({})安装 Node {} 失败:{}",
+            exe.display(),
+            version,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+        .into());
+    }
+    Ok(super::resolve_manager_node(nvm_dir, version, super::ManagerKind::Nvm)
+        .unwrap_or_else(|| nvm_dir.join(format!("v{version}")).join(super::exe_name("node"))))
+}
+
 fn run_fnm_windows(fnm_exe: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
     let out = Command::new(fnm_exe).args(args).output()?;
     if !out.status.success() {
