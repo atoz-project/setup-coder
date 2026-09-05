@@ -4,9 +4,9 @@
 //! 工单 #19 起接缝按 NodePlan 分叉:复用裸 Node → 指向用户机器上的绝对路径;
 //! 前缀内新装 LTS → 前缀布局(保底路径,#22 随 fnm 安装接线后随状态迁移移除)。
 //!
-//! 契约预告(工单 #21):shim 生成将改为按绝对路径 exec 选定 Node,
-//! 而非把 node 目录前置进 PATH;届时 `platform::shim_content` / `write_shim`
-//! 的入参会从 node_bin_dir 变为本接缝给出的 exe 绝对路径。
+//! 契约(工单 #21):shim 以本接缝给出的选定 Node 绝对路径直接 exec Tool 入口 JS,
+//! 不再把任何 node 目录前置进 PATH(`platform::shim_content` / `write_shim` 的入参
+//! 即 `NodeSource::exe`)。
 
 use std::path::{Path, PathBuf};
 
@@ -24,7 +24,7 @@ pub const NODE_VERSION: &str = "v24.19.0";
 /// 不存在 prefix 值——Node 永不落前缀,见 ADR-0003)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeSource {
-    /// node / node.exe 可执行文件的绝对路径
+    /// node / node.exe 可执行文件的绝对路径(已解析 symlink 的「实体」路径)
     exe: PathBuf,
     /// Node 版本(如 `v24.19.0`)
     version: String,
@@ -54,6 +54,26 @@ impl NodeSource {
         self.exe.parent().expect("node exe 必有父目录")
     }
 
+    /// 解析出 npm-cli.js / shim 能依托的「实体」exe:symlink 解析到真实 Node 本体。
+    ///
+    /// 关键性(工单 #21):bin_dir()/node_dir()/npm_cli() 全部由 exe 逐级上推目录。
+    /// 若 exe 是 PATH 上的 symlink(Homebrew、用户自建软链),直接上推会穿过安装根,
+    /// 得到错误前缀(如 `/tmp/…/bin/node` → 根 `/tmp/…`,npm-cli 落在 `/tmp/…/lib/…`)。
+    /// canonicalize 跟随 symlink 拿到真实发行版内的 exe(如 nvm 的
+    /// `…/versions/node/vX/bin/node`),保证 node_dir/npm_cli 正确。非 symlink 路径原样。
+    fn resolved_exe(exe: &Path) -> PathBuf {
+        std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf())
+    }
+
+    /// 以「实体化」的 exe 构造 NodeSource(复用裸 Node / 从清单恢复共用)
+    fn from_exe(exe: PathBuf, version: String, kind: NodeSourceKind) -> NodeSource {
+        NodeSource {
+            exe: Self::resolved_exe(&exe),
+            version,
+            kind,
+        }
+    }
+
     /// Node 解压根目录(npm-cli.js 相对它定位)。
     /// 前缀内 Node 与裸 Node 同为 Node 发行版布局,规则一致
     /// (exe 位于 `<根>/bin/node`,Windows 位于 `<根>/node.exe`)。
@@ -80,12 +100,10 @@ fn prefix_node(prefix: &Prefix) -> NodeSource {
 }
 
 /// 管理器来源:指向管理器安装目录下已解析的 node exe(版本已验证为已装达标)。
+/// 与复用裸 Node 同走 `from_exe` 实体化(canonicalize):npm_cli 由 exe 逐级上推,
+/// 管理器布局若含 symlink(如 nvm-windows 的 junction)也落在真实发行版布局内。
 fn managed_node(exe: PathBuf, floor: &semver::Version, kind: NodeSourceKind) -> NodeSource {
-    NodeSource {
-        exe,
-        version: format!("v{floor}"),
-        kind,
-    }
+    NodeSource::from_exe(exe, format!("v{floor}"), kind)
 }
 
 /// 按决策结果解析选定 Node:复用裸 Node / 管理器(nvm/fnm)装好的 Node →
@@ -94,11 +112,7 @@ pub fn for_plan(prefix: &Prefix, plan: &NodePlan) -> NodeSource {
     match plan {
         NodePlan::ReuseBareNode { path, .. } => {
             let version = platform::version_output_of(path).unwrap_or_else(|| "unknown".into());
-            NodeSource {
-                exe: path.clone(),
-                version,
-                kind: NodeSourceKind::UserBare,
-            }
+            NodeSource::from_exe(path.clone(), version, NodeSourceKind::UserBare)
         }
         // UseNvm/UseFnm:执行层(decide_node_with)已装好并验证过该版本,这里只做布局推导
         NodePlan::UseNvm { path, version } => managed_node(
@@ -121,11 +135,11 @@ pub fn for_plan(prefix: &Prefix, plan: &NodePlan) -> NodeSource {
 /// 清单无 Node 记录或缺 exe 路径时回退保底前缀内 Node。
 pub fn from_state(prefix: &Prefix, state: &crate::prefix::State) -> NodeSource {
     match &state.node {
-        Some(node) if node.exe.is_some() => NodeSource {
-            exe: node.exe.clone().expect("已判定 is_some"),
-            version: node.version.clone(),
-            kind: node.source,
-        },
+        Some(node) if node.exe.is_some() => NodeSource::from_exe(
+            node.exe.clone().expect("已判定 is_some"),
+            node.version.clone(),
+            node.source,
+        ),
         _ => prefix_node(prefix),
     }
 }
@@ -156,23 +170,25 @@ mod tests {
         );
     }
 
-    /// 决策 → NodeSource 接线:复用裸 Node 指向用户机器上的绝对路径
+    /// 决策 → NodeSource 接线:复用裸 Node 解析 symlink 到「实体」exe,
+    /// bin_dir/node_dir/npm_cli 全部相对该实体推导(不穿过安装根)。
     #[test]
-    fn reuse_bare_node_points_at_user_exe() {
+    fn reuse_bare_node_points_at_resolved_exe() {
         let prefix = Prefix::new(PathBuf::from("/x/.setup-coder"));
         let plan = NodePlan::ReuseBareNode {
             path: PathBuf::from("/usr/local/bin/node"),
             version: Version::new(22, 19, 0),
         };
         let node = for_plan(&prefix, &plan);
-        assert_eq!(node.exe(), Path::new("/usr/local/bin/node"));
+        // exe = canonicalize(计划路径);若该路径不存在(如本测试在 unix 上造的路径),
+        // canonicalize 失败则原样保留。无论哪条,后续派生都自洽。
+        let expected_exe = NodeSource::resolved_exe(Path::new("/usr/local/bin/node"));
+        assert_eq!(node.exe(), expected_exe);
         assert_eq!(node.kind(), NodeSourceKind::UserBare);
-        // bin/解压根/npm-cli 按 Node 发行版布局推导(本机该路径不存在 → version unknown)
-        assert_eq!(node.bin_dir(), Path::new("/usr/local/bin"));
-        assert_eq!(node.node_dir(), Path::new("/usr/local"));
+        assert_eq!(node.bin_dir(), expected_exe.parent().unwrap());
         assert_eq!(
             node.npm_cli(),
-            Path::new("/usr/local").join(platform::npm_cli_subpath())
+            node.node_dir().join(platform::npm_cli_subpath())
         );
     }
 
@@ -180,6 +196,85 @@ mod tests {
     /// 已装版本的 node exe 绝对路径;kind 分别为 user_nvm / user_fnm。
     /// 用桩 exe(sh 脚本)占位,不依赖真实 nvm/fnm。
     #[cfg(unix)]
+    /// symlink 实体化:PATH 上的软链 node(如 Homebrew/自建)解析到真实发行版内的 exe,
+    /// 派生的 node_dir/npm_cli 落在真实发行版布局内而非软链所在目录的上级。
+    #[cfg(unix)]
+    #[test]
+    fn reuse_resolves_symlink_to_real_node_root() {
+        use std::os::unix::fs::symlink;
+        // 造一个假的 Node 发行版布局:<root>/bin/node + <root>/lib/node_modules/npm/bin/npm-cli.js
+        let dir = std::env::temp_dir().join(format!("t7-node-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let real_root = dir.join("real-node");
+        let real_bin = real_root.join("bin");
+        std::fs::create_dir_all(real_root.join("lib/node_modules/npm/bin")).unwrap();
+        std::fs::create_dir_all(&real_bin).unwrap();
+        std::fs::write(real_bin.join("node"), "fake").unwrap();
+        std::fs::write(
+            real_root.join("lib/node_modules/npm/bin/npm-cli.js"),
+            "fake",
+        )
+        .unwrap();
+        // 在别处建一个软链指向它(模拟 PATH 上的软链 node)
+        let link_dir = dir.join("links");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        let link = link_dir.join("node");
+        symlink(real_bin.join("node"), &link).unwrap();
+
+        let prefix = Prefix::new(dir.join("prefix"));
+        let node = for_plan(
+            &prefix,
+            &NodePlan::ReuseBareNode {
+                path: link.clone(),
+                version: Version::new(22, 19, 0),
+            },
+        );
+        // exe 解析到真实发行版内的 node;npm_cli 落在真实发行版布局内
+        let resolved = NodeSource::resolved_exe(&link);
+        assert_eq!(node.exe(), resolved);
+        assert!(node.npm_cli().exists(), "npm_cli 应解析到真实存在路径");
+        // 期望路径同样经 canonicalize(macOS /var→/private/var),再比较
+        let expected =
+            NodeSource::resolved_exe(&real_root.join("lib/node_modules/npm/bin/npm-cli.js"));
+        assert_eq!(node.npm_cli(), expected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 选定运行时的 npm-cli.js 解析:prefix / 裸 Node / nvm / fnm 四种布局的
+    /// exe 与 node_dir 均为同一 Node 发行版相对布局(unix `<根>/bin/node`),
+    /// 故 `lib/node_modules/npm/bin/npm-cli.js` 的相对推导对四者一致成立。
+    #[test]
+    fn npm_cli_resolves_per_runtime_layout() {
+        for (exe, expected_npm_cli) in [
+            // 前缀保底 Node
+            (
+                "/x/.setup-coder/node/bin/node",
+                "/x/.setup-coder/node/lib/node_modules/npm/bin/npm-cli.js",
+            ),
+            // 裸 Node(发行版布局)
+            (
+                "/usr/local/bin/node",
+                "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+            ),
+            // nvm:`~/.nvm/versions/node/vX/`
+            (
+                "/home/u/.nvm/versions/node/v22.19.0/bin/node",
+                "/home/u/.nvm/versions/node/v22.19.0/lib/node_modules/npm/bin/npm-cli.js",
+            ),
+            // fnm:`~/.local/share/fnm/node-versions/vX/installation/`
+            (
+                "/home/u/.local/share/fnm/node-versions/v22.19.0/installation/bin/node",
+                "/home/u/.local/share/fnm/node-versions/v22.19.0/installation/lib/node_modules/npm/bin/npm-cli.js",
+            ),
+        ] {
+            let source = NodeSource {
+                exe: PathBuf::from(exe),
+                version: "v22.19.0".into(),
+                kind: NodeSourceKind::UserBare,
+            };
+            assert_eq!(source.npm_cli(), Path::new(expected_npm_cli), "exe={exe}");
+        }
+    }
     #[test]
     fn manager_plans_resolve_to_installed_node() {
         use std::os::unix::fs::PermissionsExt;
@@ -208,7 +303,7 @@ mod tests {
                 version: version.clone(),
             },
         );
-        assert_eq!(nvm.exe(), nvm_exe.as_path());
+        assert_eq!(nvm.exe(), NodeSource::resolved_exe(&nvm_exe));
         assert_eq!(nvm.version(), "v22.19.0");
         assert_eq!(nvm.kind(), NodeSourceKind::UserNvm);
 
@@ -219,7 +314,7 @@ mod tests {
                 version,
             },
         );
-        assert_eq!(fnm.exe(), fnm_exe.as_path());
+        assert_eq!(fnm.exe(), NodeSource::resolved_exe(&fnm_exe));
         assert_eq!(fnm.version(), "v22.19.0");
         assert_eq!(fnm.kind(), NodeSourceKind::UserFnm);
         fs::remove_dir_all(&root).unwrap();

@@ -3,7 +3,7 @@
 //! 流水线:建前缀骨架 → 探测 Node 事实 → 纯决策 → 按方案执行
 //! (达标裸 Node 复用 #19;经已有 nvm/fnm 装下限版本 #20;新装 fnm 为 #22)→
 //! 确保 git(Prerequisite,工单 #3)→ 复制 setup-coder 本体 → npm 装 Tool(注册表)→
-//! 生成 shim → 冒烟(`--version`,Installed 定义)→ 注入 PATH → 写 state.json。
+//! 生成 shim(绝对路径 exec 选定 Node,无 PATH 前置,工单 #21)→ 冒烟(`--version`,Installed 定义)→ 注入 PATH → 写 state.json。
 //! 重跑 = 修复/升级,幂等。
 
 use std::error::Error;
@@ -320,7 +320,8 @@ fn write_npmrc(prefix: &Prefix) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// 给子进程准备的 PATH:选定 Node 的 bin 目录在最前(npm/Tool 的 #!/usr/bin/env node 依赖它)
+/// 给子进程准备的 PATH:选定 Node 的 bin 目录在最前(npm 自身子进程/spawn 依赖 env node;
+/// Tool 的 shim 走绝对路径,不依赖它——工单 #21)
 fn path_with_node(node: &NodeSource) -> Result<OsString, Box<dyn Error>> {
     let mut paths = vec![node.bin_dir().to_path_buf()];
     if let Some(existing) = std::env::var_os("PATH") {
@@ -368,14 +369,10 @@ fn install_tool(
         return Err(format!("npm 安装 {} 失败(退出码 {:?})", tool.package, status.code()).into());
     }
 
-    // 工单 #21 契约变更预告:shim 将按绝对路径 exec 选定 Node,
-    // 而非把 node bin 目录前置进 PATH;届时此处传 node.exe() 而非 bin 目录
-    let shim = platform::write_shim(
-        &prefix.bin_dir(),
-        node.bin_dir(),
-        &prefix.npm_bin_dir(),
-        tool.bin,
-    )?;
+    // 去劫持契约(工单 #21):shim 以选定 Node 的绝对路径 exec Tool 入口,
+    // 不再把 node bin 目录前置进 PATH;重跑覆写旧形态 shim。
+    let launcher = platform::tool_launcher(&prefix.npm_bin_dir(), tool.bin)?;
+    let shim = platform::write_shim(&prefix.bin_dir(), node.exe(), &launcher, tool.bin)?;
 
     // 冒烟:Installed = 能启动并报出版本号(CONTEXT.md)
     let version = smoke_version(&shim).map_err(|e| {
@@ -540,7 +537,7 @@ mod tests {
                 "{key} 应限定在前缀内"
             );
         }
-        // PATH 首项 = 复用 Node 的 bin 目录(npm/Tool 的 env node shebang 依赖它)
+        // PATH 首项 = 复用 Node 的 bin 目录(npm 自身子进程的 env node 依赖它)
         let path = envs
             .get(std::ffi::OsStr::new("PATH"))
             .and_then(|v| v.as_ref())
@@ -644,17 +641,19 @@ mod tests {
         };
         let mut state = State::default();
         let node = decide_node_with(&prefix, &tools, &facts, &mut state).unwrap();
-        assert_eq!(node.exe(), stub_exe.as_path());
+        // 合并 #21 后选定 exe 经 from_exe canonicalize(macOS /var→/private/var 归一)
+        let expected_exe = std::fs::canonicalize(&stub_exe).unwrap_or_else(|_| stub_exe.clone());
+        assert_eq!(node.exe(), expected_exe.as_path());
         assert_eq!(node.kind(), NodeSourceKind::UserNvm);
         assert_eq!(node.version(), format!("v{floor}"), "选定版本即工具集下限");
         let recorded = state.node.clone().expect("应落账 user_nvm");
         assert_eq!(recorded.source, NodeSourceKind::UserNvm);
-        assert_eq!(recorded.exe.as_deref(), Some(stub_exe.as_path()));
+        assert_eq!(recorded.exe.as_deref(), Some(expected_exe.as_path()));
         assert_eq!(recorded.version, format!("v{floor}"));
 
         // 幂等:二次调用(状态已有记录 + 管理器已有版本)仍复用同一路径
         let node2 = decide_node_with(&prefix, &tools, &facts, &mut state).unwrap();
-        assert_eq!(node2.exe(), stub_exe.as_path(), "重跑不得重装,应复用同一 exe");
+        assert_eq!(node2.exe(), expected_exe.as_path(), "重跑不得重装,应复用同一 exe");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -683,16 +682,18 @@ mod tests {
         };
         let mut state = State::default();
         let node = decide_node_with(&prefix, &tools, &facts, &mut state).unwrap();
-        assert_eq!(node.exe(), stub_exe.as_path());
+        // 合并 #21 后选定 exe 经 from_exe canonicalize(macOS /var→/private/var 归一)
+        let expected_exe = std::fs::canonicalize(&stub_exe).unwrap_or_else(|_| stub_exe.clone());
+        assert_eq!(node.exe(), expected_exe.as_path());
         assert_eq!(node.kind(), NodeSourceKind::UserFnm);
         assert_eq!(node.version(), format!("v{floor}"));
         let recorded = state.node.clone().expect("应落账 user_fnm");
         assert_eq!(recorded.source, NodeSourceKind::UserFnm);
-        assert_eq!(recorded.exe.as_deref(), Some(stub_exe.as_path()));
+        assert_eq!(recorded.exe.as_deref(), Some(expected_exe.as_path()));
 
         // 幂等:二次调用仍复用同一路径
         let node2 = decide_node_with(&prefix, &tools, &facts, &mut state).unwrap();
-        assert_eq!(node2.exe(), stub_exe.as_path());
+        assert_eq!(node2.exe(), expected_exe.as_path());
         fs::remove_dir_all(&root).unwrap();
     }
 
