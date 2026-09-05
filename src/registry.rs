@@ -56,8 +56,6 @@ pub fn find(name_or_bin: &str) -> Option<&'static Tool> {
 
 /// 所选工具集的 Node 版本下限:各工具 `engines.node` 下限的最大值。
 /// 空集合返回 0.0.0(不限制,任何 Node 均达标);空选择是否合法由调用方决定。
-// 注:决策层(工单 #16)尚未接线到 install,接线前豁免死代码告警
-#[allow(dead_code)]
 pub fn floor_for_tools(tools: &[&Tool]) -> Version {
     tools
         .iter()

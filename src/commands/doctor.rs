@@ -57,12 +57,21 @@ fn doctor() -> i32 {
         }
     };
 
-    // 经唯一解析接缝获取选定 Node(工单 #15;本阶段恒为前缀内 Node)
-    let node = node_source::resolve(&prefix);
+    // 经唯一解析接缝获取选定 Node:按 v2 清单落账解析(复用 = 用户机器上的绝对路径)
+    let node = node_source::from_state(
+        &prefix,
+        &state.clone().unwrap_or_default(),
+    );
+    let source_label = match node.kind() {
+        crate::prefix::NodeSourceKind::UserBare => "复用用户裸 Node",
+        crate::prefix::NodeSourceKind::UserNvm => "经 nvm",
+        crate::prefix::NodeSourceKind::UserFnm => "经 fnm",
+    };
     check(
         &mut failures,
         "Node.js",
-        platform::version_output_of(node.exe()).map(|v| format!("{v}(前缀内)")),
+        platform::version_output_of(node.exe())
+            .map(|v| format!("{v}({source_label},{})", node.exe().display())),
         "重跑 setup-coder install 修复 Node.js",
     );
 

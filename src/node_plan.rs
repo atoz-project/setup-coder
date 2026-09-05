@@ -13,8 +13,6 @@ use semver::Version;
 
 use crate::registry::{Tool, floor_for_tools};
 
-// 工单 #16 只交付决策层,尚未接线到 install(#18/#19 消费);接线前豁免死代码告警
-#[allow(dead_code)]
 /// 探测到的机器事实(IO 由调用方完成,本类型只承载结果)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeFacts {
@@ -31,7 +29,6 @@ pub struct NodeFacts {
 /// 各变体携带的 `Version` 即所选工具集的下限(`floor_for_tools`),由执行层决定
 /// 具体装/切到哪个满足下限的版本(本层不挑选具体版本号,不做网络查询)。
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // 同上:未接线
 pub enum NodePlan {
     /// 裸 Node 已达标,直接复用。携带:node 可执行文件路径、所满足的下限版本
     ReuseBareNode { path: PathBuf, version: Version },
@@ -50,7 +47,6 @@ pub enum NodePlan {
 /// 2. 否则有 nvm → 用 nvm
 /// 3. 否则有 fnm → 用 fnm
 /// 4. 都没有 → 新装 fnm
-#[allow(dead_code)] // 同上:未接线
 pub fn decide(facts: &NodeFacts, tools: &[&Tool]) -> NodePlan {
     let floor = floor_for_tools(tools);
     if let Some((version, path)) = &facts.bare_node {

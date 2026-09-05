@@ -22,8 +22,8 @@ pub const STATE_VERSION: u32 = 2;
 /// 布局(详见 ARCHITECTURE.md):
 /// `bin/` 唯一进 PATH;`npm/` npm prefix;`git/` 仅 Windows;
 /// `cache/` 下载缓存;`state.json` 安装清单。
-/// 注:新模型下 Node 永不落前缀(经用户级 nvm/fnm 安装,ADR-0003);
-/// `node_dir` 等仅服务过渡期接缝(工单 #15),最终来源接线后移除。
+/// 注:新模型下 Node 永不落前缀(经用户级 nvm/fnm 安装,ADR-0003;#19 起裸 Node
+/// 直接复用);`node_dir` 等仅服务保底下载路径(#22 的 InstallFnm 分支落地后移除)。
 #[derive(Debug, Clone)]
 pub struct Prefix {
     root: PathBuf,
