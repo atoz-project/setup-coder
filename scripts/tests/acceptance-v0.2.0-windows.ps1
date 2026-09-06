@@ -335,8 +335,11 @@ $n4 = $true
 foreach ($x in 'node.exe','node','npm.cmd','npm','npx.cmd','npx') {
   if (Test-Path (Join-Path $BinDir $x)) { $n4 = $false; Note "prefix bin 含违禁文件:$x" }
 }
-# 前缀内(除 cache\ 下载缓存外)不允许出现 node 发行布局
-$nodeInPrefix = Get-ChildItem $Prefix -Recurse -Force -ErrorAction SilentlyContinue |
+# 前缀内(除 cache\ 下载缓存外)不允许出现 node 发行布局。只匹配【文件】——
+# npm 包内容里可能有名为 node 的目录(实机:pi 的依赖 @earendil-works/chord
+# 带 dist\node\ 目录),目录不是 Node 运行时,匹配目录会误报;语义与 linux
+# 脚本 `find -type f -name node` 对齐
+$nodeInPrefix = Get-ChildItem $Prefix -Recurse -Force -File -ErrorAction SilentlyContinue |
   Where-Object { $_.FullName -notlike "$Prefix\cache\*" -and $_.Name -in 'node.exe','node' } |
   Select-Object -First 1
 if ($nodeInPrefix) { $n4 = $false; Note "prefix 内(除 cache)发现 node:$($nodeInPrefix.FullName)" }
