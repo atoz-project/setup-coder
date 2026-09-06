@@ -370,7 +370,12 @@ pub fn shim_content(
 
 /// Node 自带 npm-cli.js 相对 `node/` 的路径(unix 在 `lib/` 下,Windows 在根)
 pub fn npm_cli_subpath() -> PathBuf {
-    if cfg!(windows) {
+    npm_cli_subpath_for(cfg!(windows))
+}
+
+/// `npm_cli_subpath` 的显式平台参数版(跨平台纯路径测试与运行时共用一处逻辑)。
+pub fn npm_cli_subpath_for(windows: bool) -> PathBuf {
+    if windows {
         ["node_modules", "npm", "bin", "npm-cli.js"]
             .iter()
             .collect()
