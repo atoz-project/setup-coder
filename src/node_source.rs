@@ -59,7 +59,17 @@ impl NodeSource {
     /// canonicalize 跟随 symlink 拿到真实发行版内的 exe(如 nvm 的
     /// `…/versions/node/vX/bin/node`),保证 node_dir/npm_cli 正确。非 symlink 路径原样。
     fn resolved_exe(exe: &Path) -> PathBuf {
-        std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf())
+        let canon = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+        // Windows:canonicalize 产出 \\?\ verbatim 路径,cmd.exe 不认(.cmd shim
+        // 冒烟必「找不到路径」,实机 exit 3)——剥回常规盘符路径;unix 原样
+        #[cfg(windows)]
+        {
+            platform::simplify_verbatim_path(&canon)
+        }
+        #[cfg(unix)]
+        {
+            canon
+        }
     }
 
     /// 以「实体化」的 exe 构造 NodeSource(复用裸 Node / 从清单恢复共用)

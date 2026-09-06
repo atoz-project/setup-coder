@@ -323,12 +323,15 @@ pub fn tool_launcher(npm_bin_dir: &Path, package: &str, bin: &str) -> io::Result
         )
     })?;
     let entry = pkg_dir.join(&rel);
-    fs::canonicalize(&entry).map_err(|e| {
+    // canonicalize 实体化后剥掉 \\?\ verbatim 前缀:该路径要写进 .cmd shim,
+    // cmd.exe 不认扩展长度语法(实机冒烟 exit 3「找不到路径」)
+    let entry = fs::canonicalize(&entry).map_err(|e| {
         io::Error::new(
             e.kind(),
             format!("解析 Tool 入口失败:{}:{e}", entry.display()),
         )
-    })
+    })?;
+    Ok(simplify_verbatim_path(&entry))
 }
 
 /// 从 package.json 文本解出指定 bin 的入口相对路径(纯逻辑,可单测)。
@@ -349,6 +352,27 @@ fn package_bin_entry(package_json: &str, bin: &str) -> Option<PathBuf> {
         return None;
     }
     Some(PathBuf::from(rel))
+}
+
+/// 剥掉 Windows canonicalize 返回的 `\\?\` verbatim 前缀(仅盘符绝对路径;
+/// `\\?\UNC\…` 网络路径保留原样)。Rust std 文档明言 canonicalize 在 Windows
+/// 产出扩展长度路径语法,「可能与其他程序不兼容」——写进 .cmd shim 或传给
+/// cmd.exe 时必「The system cannot find the path specified」(实机 exit 3,
+/// shim 存在但执行即败)。
+#[cfg(any(windows, test))]
+pub fn simplify_verbatim_path(path: &Path) -> PathBuf {
+    let s = path.as_os_str().to_string_lossy();
+    let Some(rest) = s.strip_prefix(r"\\?\") else {
+        return path.to_path_buf();
+    };
+    if rest.starts_with("UNC\\") {
+        return path.to_path_buf();
+    }
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
 }
 
 /// 当前平台的 shim 内容(供薄接缝落盘与单测断言)。
@@ -1644,6 +1668,30 @@ mod tests {
         assert_eq!(package_bin_entry(r#"{"name":"x"}"#, "x"), None);
         assert_eq!(package_bin_entry(r#"{"bin":{"x":""}}"#, "x"), None);
         assert_eq!(package_bin_entry("not json", "x"), None);
+    }
+
+    /// simplify_verbatim_path:盘符绝对路径剥掉 `\\?\` 前缀(写进 .cmd shim 的
+    /// 前提,cmd.exe 不认扩展长度语法);UNC verbatim 与非前缀路径原样保留。
+    #[test]
+    fn simplify_verbatim_strips_drive_prefix_only() {
+        assert_eq!(
+            simplify_verbatim_path(Path::new(r"\\?\C:\Users\u\.setup-coder\npm\x.js")),
+            PathBuf::from(r"C:\Users\u\.setup-coder\npm\x.js")
+        );
+        // UNC verbatim(\\?\UNC\server\share)保留——直接剥会改变语义
+        assert_eq!(
+            simplify_verbatim_path(Path::new(r"\\?\UNC\server\share\x")),
+            PathBuf::from(r"\\?\UNC\server\share\x")
+        );
+        // 非前缀路径原样
+        assert_eq!(
+            simplify_verbatim_path(Path::new(r"C:\plain\x")),
+            PathBuf::from(r"C:\plain\x")
+        );
+        assert_eq!(
+            simplify_verbatim_path(Path::new("/unix/path")),
+            PathBuf::from("/unix/path")
+        );
     }
 
     /// unix tool_launcher:npm 全局 bin 是相对 symlink → canonicalize 为包内入口 JS 的
