@@ -139,9 +139,24 @@ fn node_location(node: &NodeState) -> String {
 ///
 /// `state.node.source` 决定文案;`state.path_injections` 里是否存在 FnmHook
 /// 记录区分「fnm 是否由 setup-coder 代装」(代装时 install 一定注入了钩子行)。
-/// 提示只讲「保留了什么 + 手工移除步骤」,绝不在卸载里替用户删任何 Node 资产。
+/// 部分清单(F3:安装失败在 Node 落账前,node 无记录)但带 FnmHook 记录时,
+/// fnm 同样已代装在盘上,提示照常给出。提示只讲「保留了什么 + 手工移除步骤」,
+/// 绝不在卸载里替用户删任何 Node 资产。
 fn preserved_hint(state: &State) -> Option<String> {
-    let node = state.node.as_ref()?;
+    let Some(node) = state.node.as_ref() else {
+        // F3 部分清单(安装失败在 Node 落账前):钩子记录证明 fnm 已代装且在盘上
+        if has_fnm_hook(state) {
+            let fnm_dir = crate::node_source::fnm_default_home()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|_| "fnm 数据目录".to_string());
+            return Some(format!(
+                "setup-coder 为你安装了 fnm 与 Node(安装未全部完成;位于 {fnm_dir}),\
+                 卸载未删除它们。如需移除:删除 {fnm_dir},并移除 shell rc 中残留的 \
+                 fnm 钩子行(卸载已按记录回滚)。"
+            ));
+        }
+        return None;
+    };
     let location = node_location(node);
     Some(match node.source {
         NodeSourceKind::UserBare => {
@@ -337,6 +352,57 @@ mod tests {
         let s = State::default();
         assert!(preserved_hint(&s).is_none());
         assert!(preserved_summary(&s).is_none());
+    }
+
+    /// F3 部分清单(node 未落账、仅 FnmHook 记录):保留提示仍按「代装 fnm」给出
+    /// (fnm 已在盘上,uninstall 按设计保留);v0.2.0 此时直接 None。
+    #[test]
+    fn preserved_hint_partial_manifest_setup_coder_fnm() {
+        let mut s = State::default();
+        s.record_injection(PathInjection::FnmHook {
+            file: PathBuf::from("/home/u/.zshrc"),
+            line: "l".into(),
+        });
+        let hint = preserved_hint(&s).expect("部分清单(仅钩子记录)也应给代装 fnm 提示");
+        assert!(hint.contains("setup-coder 为你安装了 fnm"), "代装措辞:{hint}");
+        assert!(hint.contains("删除"), "给出移除步骤:{hint}");
+        // 无钩子记录的部分清单 → 仍 None(与空清单一致)
+        assert!(preserved_hint(&State::default()).is_none());
+    }
+
+    /// F3 回归:部分清单(node 未落账、仅 FnmHook 记录——v0.2.0 Windows 实机的
+    /// 失败形态)下 uninstall 仍按记录精确回滚钩子行、删前缀,用户 rc 其余内容
+    /// 不受影响。
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_rolls_back_hooks_from_partial_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "setup-coder-test-un-partial-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let _home = crate::test_util::ScopedHome::set(&root);
+        let prefix = Prefix::home().unwrap();
+        std::fs::create_dir_all(prefix.root()).unwrap();
+
+        // 部分清单:fnm 已代装、钩子已注入 rc、Node 未落账(F1 失败形态)
+        let hook_line = platform::fnm_hook_line();
+        let rc = root.join(".zshrc");
+        std::fs::write(&rc, format!("# user rc\n{hook_line}\n")).unwrap();
+        let mut state = State::default();
+        state.record_injection(PathInjection::FnmHook {
+            file: rc.clone(),
+            line: hook_line.clone(),
+        });
+        state.save(&prefix).unwrap();
+
+        uninstall(true).unwrap();
+
+        let after = std::fs::read_to_string(&rc).unwrap();
+        assert!(!after.contains("fnm env"), "钩子行应被精确回滚:{after}");
+        assert!(after.contains("# user rc"), "用户原内容保留:{after}");
+        assert!(!prefix.root().exists(), "前缀已删");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

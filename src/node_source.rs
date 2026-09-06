@@ -5,7 +5,7 @@
 //! 管理器方案(nvm/fnm)→ 管理器布局下已装版本的 exe。Node 永不落前缀(ADR-0003,
 //! 工单 #22):全部四种方案都解析到用户机器上的 Node,不存在前缀保底路径。
 //!
-//! 契约(工单 #21):shim 以本接缝给出的选定 Node 绝对路径直接 exec Tool 入口 JS,
+//! 契约(工单 #21):JS 入口的 shim 以本接缝给出的选定 Node 绝对路径解释执行,
 //! 不再把任何 node 目录前置进 PATH(`platform::shim_content` / `write_shim` 的入参
 //! 即 `NodeSource::exe`)。
 
@@ -59,7 +59,17 @@ impl NodeSource {
     /// canonicalize 跟随 symlink 拿到真实发行版内的 exe(如 nvm 的
     /// `…/versions/node/vX/bin/node`),保证 node_dir/npm_cli 正确。非 symlink 路径原样。
     fn resolved_exe(exe: &Path) -> PathBuf {
-        std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf())
+        let canon = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+        // Windows:canonicalize 产出 \\?\ verbatim 路径,cmd.exe 不认(.cmd shim
+        // 冒烟必「找不到路径」,实机 exit 3)——剥回常规盘符路径;unix 原样
+        #[cfg(windows)]
+        {
+            platform::simplify_verbatim_path(&canon)
+        }
+        #[cfg(unix)]
+        {
+            canon
+        }
     }
 
     /// 以「实体化」的 exe 构造 NodeSource(复用裸 Node / 从清单恢复共用)
@@ -71,17 +81,30 @@ impl NodeSource {
         }
     }
 
-    /// Node 解压根目录(npm-cli.js 相对它定位)。exe 位于 `<根>/bin/node`
-    /// (Windows 位于 `<根>/node.exe`),bin_dir 的上级即解压根。
+    /// Node 解压根目录(npm-cli.js 相对它定位)。
+    ///
+    /// 布局:unix 的 exe 位于 `<根>/bin/node`(bin 上级即根);Windows 的 exe 直接
+    /// 在解压根(`<根>/node.exe`)——fnm 的 `…/installation/node.exe`、官方 zip、
+    /// nvm-windows 版本目录同属此形态,bin_dir 即根。v0.2.0 曾无条件多上一级,
+    /// Windows 实机把 installation 的父目录当根,npm-cli 探针必炸(F1 后续)。
     pub fn node_dir(&self) -> &Path {
-        // 布局:unix 为 node/bin/node、Windows 为 node/node.exe
-        // (见 platform::node_bin_subdir),故 bin_dir 的上级即解压根
-        self.bin_dir().parent().expect("node bin 目录必有父目录")
+        node_root_from_bin_dir(self.bin_dir(), cfg!(windows))
     }
 
     /// 选定 Node 自带的 npm-cli.js 绝对路径(布局因平台而异)
     pub fn npm_cli(&self) -> PathBuf {
         self.node_dir().join(platform::npm_cli_subpath())
+    }
+}
+
+/// 由 node 所在 bin 目录推导 Node 解压根(纯逻辑,跨平台两种形态可单测):
+/// Windows 的 exe 直接在解压根(bin_dir 即根);unix 的 exe 在 `<根>/bin/`
+/// (bin 上级为根)。与 `platform::node_bin_subdir_for` 同一 per-OS 约定。
+fn node_root_from_bin_dir(bin_dir: &Path, windows: bool) -> &Path {
+    if windows {
+        bin_dir
+    } else {
+        bin_dir.parent().expect("node bin 目录必有父目录")
     }
 }
 
@@ -132,7 +155,7 @@ fn resolve_installed(
 }
 
 /// 当前用户家目录下的 fnm 默认数据目录(InstallFnm 的安装目标,与探测一致)。
-/// Windows 为 `%LOCALAPPDATA%\fnm`(imp 覆盖),unix 为 `~/.local/share/fnm`(mod.rs 共享定义)。
+/// Windows 为 `%APPDATA%\fnm`(fnm 真实默认,Roaming;FNM_DIR 优先),unix 为 `~/.local/share/fnm`。
 /// uninstall 的「代装 fnm 手工移除指引」复用同一路径(工单 #23)。
 pub(crate) fn fnm_default_home() -> Result<PathBuf, String> {
     let home = std::env::home_dir().ok_or_else(|| "无法确定用户家目录(HOME 未设置)".to_string())?;
@@ -247,6 +270,38 @@ mod tests {
             assert_eq!(source.npm_cli(), Path::new(expected_npm_cli), "exe={exe}");
         }
     }
+
+    /// node_dir/npm_cli(F1 后续,Windows 实机):exe 直接在解压根的布局
+    /// (fnm `…/installation/node.exe`、官方 zip 根、nvm-windows 版本目录)下
+    /// bin_dir 即解压根——v0.2.0 无条件多上一级,npm-cli 探针指到
+    /// `installation` 的父目录,Windows 实机必「选定 Node 自带 npm 不存在」。
+    #[test]
+    fn node_dir_and_npm_cli_cover_windows_rootless_layouts() {
+        use platform::npm_cli_subpath_for;
+        // unix 布局不变:<根>/bin → 根;<根>/lib/node_modules/npm/bin/npm-cli.js
+        assert_eq!(
+            node_root_from_bin_dir(Path::new("/x/node/bin"), false),
+            Path::new("/x/node")
+        );
+        assert_eq!(
+            node_root_from_bin_dir(Path::new("/x/node/bin"), false)
+                .join(npm_cli_subpath_for(false)),
+            Path::new("/x/node/lib/node_modules/npm/bin/npm-cli.js")
+        );
+        // windows 布局:bin_dir 即根(fnm installation 同形态;实机路径形态)
+        let inst = Path::new(r"C:\Users\u\AppData\Roaming\fnm\node-versions\v22.19.0\installation");
+        assert_eq!(node_root_from_bin_dir(inst, true), inst);
+        assert_eq!(
+            node_root_from_bin_dir(inst, true).join(npm_cli_subpath_for(true)),
+            inst.join("node_modules").join("npm").join("bin").join("npm-cli.js")
+        );
+        // 官方 zip / msi 根、nvm-windows 版本目录同规则
+        let zip_root = Path::new(r"C:\Program Files\nodejs");
+        assert_eq!(node_root_from_bin_dir(zip_root, true), zip_root);
+        let nvm_v = Path::new(r"C:\Users\u\AppData\Roaming\nvm\v22.19.0");
+        assert_eq!(node_root_from_bin_dir(nvm_v, true), nvm_v);
+    }
+
     #[cfg(unix)]
     #[test]
     fn manager_plans_resolve_to_installed_node() {

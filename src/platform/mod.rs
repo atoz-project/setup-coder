@@ -33,9 +33,11 @@ use windows as imp;
 // 纯逻辑(全平台可编译,单测覆盖)
 // ---------------------------------------------------------------------------
 
-/// Node 可执行文件相对其解压根目录的子目录(unix `bin/`,Windows 根目录)
-pub const fn node_bin_subdir() -> &'static str {
-    if cfg!(windows) {
+/// Node 可执行文件相对其解压根目录的子目录(unix `bin/`,Windows 根目录)。
+/// 管理器布局的纯路径构造(跨平台单测断言两种形态)与运行时 `cfg!(windows)`
+/// 调用方共用这唯一一处 per-OS 逻辑。
+pub const fn node_bin_subdir_for(windows: bool) -> &'static str {
+    if windows {
         ""
     } else {
         "bin"
@@ -181,49 +183,110 @@ pub fn windows_path_remove(existing: &str, dir: &str) -> Option<String> {
     Some(kept.join(";"))
 }
 
-/// unix shim 内容(工单 #21 去劫持契约):不前置任何 node 目录进 PATH,
-/// 直接以选定 Node 的绝对路径解释执行 Tool 的真实入口 JS。
+/// Tool 入口形态,由入口文件头魔数判定(见 `tool_entry_kind`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolEntryKind {
+    /// 文本 JS 入口:shim 以选定 Node 的绝对路径解释执行(工单 #21 契约)。
+    Js,
+    /// 原生可执行(ELF/PE/Mach-O):shim 直接 exec——原生二进制不依赖 Node;
+    /// `node <二进制>` 会被 Node 当模块加载而失败(claude-code 2.x 起 bin 即
+    /// 原生单文件,Linux 上名为 `bin/claude.exe` 的 215MB ELF,实测)。
+    Native,
+}
+
+/// 嗅探 Tool 入口形态:读文件头魔数,ELF / PE(`MZ`)/ Mach-O(细/胖)→ Native;
+/// 其余(shebang 脚本、无 shebang 的裸 JS)→ Js(与既有行为一致)。
+pub fn tool_entry_kind(entry: &Path) -> io::Result<ToolEntryKind> {
+    let mut f = fs::File::open(entry)?;
+    let mut magic = [0u8; 4];
+    let n = io::Read::read(&mut f, &mut magic)?;
+    let m = &magic[..n];
+    const MACHO_MAGICS: &[&[u8]] = &[
+        &[0xfe, 0xed, 0xfa, 0xce], // 32-bit
+        &[0xfe, 0xed, 0xfa, 0xcf], // 64-bit
+        &[0xce, 0xfa, 0xed, 0xfe], // 32-bit 反序
+        &[0xcf, 0xfa, 0xed, 0xfe], // 64-bit 反序
+        &[0xca, 0xfe, 0xba, 0xbe], // fat(universal)
+        &[0xbe, 0xba, 0xfe, 0xca], // fat 反序
+    ];
+    if m.starts_with(&[0x7f, b'E', b'L', b'F'])
+        || m.starts_with(b"MZ")
+        || MACHO_MAGICS.iter().any(|magic| m.starts_with(magic))
+    {
+        Ok(ToolEntryKind::Native)
+    } else {
+        Ok(ToolEntryKind::Js)
+    }
+}
+
+/// unix shim 内容(工单 #21 去劫持契约):不前置任何 node 目录进 PATH。
+/// JS 入口以选定 Node 的绝对路径解释执行;原生入口直接 exec(不经过 Node)。
 ///
-/// `tool_launcher` 已由 `tool_launcher()` canonicalize 为包内入口 JS 的绝对路径
+/// `tool_launcher` 已由 `tool_launcher()` canonicalize 为包内入口的绝对路径
 /// (npm 全局 bin 是相对 symlink,node 以参数打开时按 cwd 解析会断链);
-/// node 以显式参数打开入口 JS,shebang 完全不生效,启动链路对 PATH 零依赖。
+/// JS 入口由 node 以显式参数打开,shebang 完全不生效,启动链路对 PATH 零依赖。
 /// 重跑覆盖旧形态 shim。
 #[cfg(any(unix, test))]
-fn unix_shim_content(node_exe: &Path, tool_launcher: &Path, bin: &str) -> String {
+fn unix_shim_content(
+    node_exe: &Path,
+    tool_launcher: &Path,
+    bin: &str,
+    kind: ToolEntryKind,
+) -> String {
+    let exec_line = match kind {
+        ToolEntryKind::Js => format!(
+            "exec \"{}\" \"{}\" \"$@\"",
+            node_exe.display(),
+            tool_launcher.display()
+        ),
+        ToolEntryKind::Native => format!("exec \"{}\" \"$@\"", tool_launcher.display()),
+    };
     format!(
         "#!/bin/sh\n\
          # setup-coder shim: {bin}(由 install 生成,重跑覆盖)\n\
-         exec \"{}\" \"{}\" \"$@\"\n",
-        node_exe.display(),
-        tool_launcher.display(),
+         {exec_line}\n"
     )
 }
 
-/// Windows shim 内容(.cmd,工单 #21 去劫持契约):不前置任何 node 目录进 PATH,
-/// 以选定 Node 的绝对路径解释执行包内入口 JS。
+/// Windows shim 内容(.cmd,工单 #21 去劫持契约):不前置任何 node 目录进 PATH。
+/// JS 入口以选定 Node 的绝对路径解释执行;原生入口(PE)直接执行,不经过 Node。
 ///
 /// 无法沿用 unix 的「exec npm bin」形态:全局 bin 的 `<bin>.cmd` 内部按
 /// `"%~dp0\node.exe"` 硬编码找 node(期望 node 与 npm 全局 bin 同目录),且带
-/// `%NODE_EXE%` 劫持分支——两条路都不可接受,故改为直接指向包内入口 JS。
+/// `%NODE_EXE%` 劫持分支——两条路都不可接受,故改为直接指向包内入口。
 #[cfg(any(windows, test))]
-fn windows_shim_content(node_exe: &Path, tool_entry_js: &Path, bin: &str) -> String {
+fn windows_shim_content(
+    node_exe: &Path,
+    tool_entry_js: &Path,
+    bin: &str,
+    kind: ToolEntryKind,
+) -> String {
+    let exec_line = match kind {
+        ToolEntryKind::Js => format!(
+            "\"{}\" \"{}\" %*",
+            node_exe.display(),
+            tool_entry_js.display()
+        ),
+        ToolEntryKind::Native => format!("\"{}\" %*", tool_entry_js.display()),
+    };
     format!(
         "@echo off\r\n\
          rem setup-coder shim: {bin}(由 install 生成,重跑覆盖)\r\n\
-         \"{}\" \"{}\" %*\r\n\
-         exit /b %errorlevel%\r\n",
-        node_exe.display(),
-        tool_entry_js.display(),
+         {exec_line}\r\n\
+         exit /b %errorlevel%\r\n"
     )
 }
 
-/// unix 的 shim 目标:npm 全局 bin 里 Tool 启动器解析到的真实入口 JS 绝对路径。
+/// unix 的 shim 目标:npm 全局 bin 里 Tool 启动器解析到的真实入口绝对路径。
 ///
-/// `<npm_bin_dir>/<bin>` 是指向包内入口 JS 的**相对** symlink(如
-/// `../lib/node_modules/@openai/codex/bin/codex.js`);node 以参数打开时相对进程 cwd
-/// 解析,会断链,故此处 canonicalize 为绝对路径。npm bin 缺失/断链时报中文错。
+/// `<npm_bin_dir>/<bin>` 是指向包内入口的**相对** symlink(如
+/// `../lib/node_modules/@openai/codex/bin/codex.js`;入口可能是 JS,也可能是
+/// claude-code 2.x 起的原生二进制,由 `tool_entry_kind` 嗅探区分);node 以参数
+/// 打开时相对进程 cwd 解析,会断链,故此处 canonicalize 为绝对路径。
+/// npm bin 缺失/断链时报中文错。`package` 与 Windows 签名对齐(unix 经 symlink
+/// 解析,无需使用)。
 #[cfg(unix)]
-pub fn tool_launcher(npm_bin_dir: &Path, bin: &str) -> io::Result<PathBuf> {
+pub fn tool_launcher(npm_bin_dir: &Path, _package: &str, bin: &str) -> io::Result<PathBuf> {
     let launcher = npm_bin_dir.join(bin);
     fs::canonicalize(&launcher).map_err(|e| {
         io::Error::new(
@@ -233,75 +296,114 @@ pub fn tool_launcher(npm_bin_dir: &Path, bin: &str) -> io::Result<PathBuf> {
     })
 }
 
-/// Windows 的 shim 目标:包内入口 JS 的绝对路径。
+/// Windows 的 shim 目标:包内入口的绝对路径(JS 或原生 PE,由 `tool_entry_kind` 嗅探)。
 ///
-/// 从 npm 全局 bin 的无扩展名 shell 启动器(纯文本,首行 shebang)解析出
-/// symlink 目标(Pacote 写的相对路径,如 `../lib/node_modules/<pkg>/cli.js`),
-/// canonicalize 为绝对路径;解析失败给出指向具体文件的中文报错(install 快速失败)。
+/// 直接读包的 package.json `bin` 字段定位入口——npm 全局 bin 的 shim 文本模板
+/// 随 npm 版本漂移(cmd-shim 是多行 `$basedir` 模板,并非旧单行 `exec node "…"`;
+/// 曾按单行模板解析,Windows 实机必「npm 全局 bin 启动器格式无法识别」),
+/// package.json 是唯一稳定的机器可读事实。Windows 的 npm 全局根即 <npm_bin_dir>
+/// 本身(无 bin/ 子层),包落在其 node_modules/ 下。
 #[cfg(windows)]
-pub fn tool_launcher(npm_bin_dir: &Path, bin: &str) -> io::Result<PathBuf> {
-    let launcher = npm_bin_dir.join(bin);
-    let text = fs::read_to_string(&launcher).map_err(|e| {
+pub fn tool_launcher(npm_bin_dir: &Path, package: &str, bin: &str) -> io::Result<PathBuf> {
+    let pkg_dir = npm_bin_dir.join("node_modules").join(package);
+    let pkg_json_path = pkg_dir.join("package.json");
+    let text = fs::read_to_string(&pkg_json_path).map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!("读取 npm 全局 bin 启动器失败:{}:{e}", launcher.display()),
+            format!("读取 Tool 包清单失败:{}:{e}", pkg_json_path.display()),
         )
     })?;
-    let target = sh_launcher_target(&text).ok_or_else(|| {
+    let rel = package_bin_entry(&text, bin).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("npm 全局 bin 启动器格式无法识别:{}", launcher.display()),
-        )
-    })?;
-    let entry = fs::canonicalize(npm_bin_dir.join(&target)).map_err(|e| {
-        io::Error::new(
-            e.kind(),
             format!(
-                "解析 Tool 入口 JS 失败:{}:{e}",
-                npm_bin_dir.join(&target).display()
+                "Tool 包 {package} 的 package.json 无 `{bin}` 入口:{}",
+                pkg_json_path.display()
             ),
         )
     })?;
-    Ok(entry)
+    let entry = pkg_dir.join(&rel);
+    // canonicalize 实体化后剥掉 \\?\ verbatim 前缀:该路径要写进 .cmd shim,
+    // cmd.exe 不认扩展长度语法(实机冒烟 exit 3「找不到路径」)
+    let entry = fs::canonicalize(&entry).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("解析 Tool 入口失败:{}:{e}", entry.display()),
+        )
+    })?;
+    Ok(simplify_verbatim_path(&entry))
 }
 
-/// 解析 npm 全局 bin 的 sh 启动器文本:shebang + `exec node "<目标>" "$@"` 单行。
-/// Pacote 在 Windows 上把 symlink 目标(相对路径)落为这样的文本文件。
+/// 从 package.json 文本解出指定 bin 的入口相对路径(纯逻辑,可单测)。
+/// 两种合法形态:`"bin": "./cli.js"`(字符串,bin 名即包名)与
+/// `"bin": {"<name>": "<path>"}`(对象,按 bin 名取)。剥离 `./` 前缀;
+/// 入口缺失/形态非法 → None(调用方报中文错,install 快速失败)。
 #[cfg(any(windows, test))]
-fn sh_launcher_target(text: &str) -> Option<PathBuf> {
-    let line = text.lines().nth(1)?.trim();
-    let target = line
-        .strip_prefix("exec ")?
-        .trim_start()
-        .strip_prefix("node")?
-        .trim_start()
-        .strip_prefix('"')?
-        .split('"')
-        .next()?;
-    if target.is_empty() {
+fn package_bin_entry(package_json: &str, bin: &str) -> Option<PathBuf> {
+    let json: serde_json::Value = serde_json::from_str(package_json).ok()?;
+    let field = json.get("bin")?;
+    let rel = match field {
+        serde_json::Value::String(s) => s.as_str(),
+        serde_json::Value::Object(map) => map.get(bin)?.as_str()?,
+        _ => return None,
+    };
+    let rel = rel.strip_prefix("./").unwrap_or(rel);
+    if rel.is_empty() {
         return None;
     }
-    Some(PathBuf::from(target))
+    Some(PathBuf::from(rel))
+}
+
+/// 剥掉 Windows canonicalize 返回的 `\\?\` verbatim 前缀(仅盘符绝对路径;
+/// `\\?\UNC\…` 网络路径保留原样)。Rust std 文档明言 canonicalize 在 Windows
+/// 产出扩展长度路径语法,「可能与其他程序不兼容」——写进 .cmd shim 或传给
+/// cmd.exe 时必「The system cannot find the path specified」(实机 exit 3,
+/// shim 存在但执行即败)。
+#[cfg(any(windows, test))]
+pub fn simplify_verbatim_path(path: &Path) -> PathBuf {
+    let s = path.as_os_str().to_string_lossy();
+    let Some(rest) = s.strip_prefix(r"\\?\") else {
+        return path.to_path_buf();
+    };
+    if rest.starts_with("UNC\\") {
+        return path.to_path_buf();
+    }
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
 }
 
 /// 当前平台的 shim 内容(供薄接缝落盘与单测断言)。
 ///
-/// 契约(工单 #21):shim 以选定 Node 的绝对路径 exec 前缀内 Tool 的入口 JS,
-/// 不向 PATH 前置任何 node 目录;setup-coder 唯一注入 PATH 的条目仍只是它自己的 bin/。
-pub fn shim_content(node_exe: &Path, tool_launcher: &Path, bin: &str) -> String {
+/// 契约(工单 #21):JS 入口由 shim 以选定 Node 的绝对路径解释执行,不向 PATH
+/// 前置任何 node 目录;原生入口(ToolEntryKind::Native)由 shim 直接 exec——
+/// 原生二进制不依赖 Node。setup-coder 唯一注入 PATH 的条目仍只是它自己的 bin/。
+pub fn shim_content(
+    node_exe: &Path,
+    tool_launcher: &Path,
+    bin: &str,
+    kind: ToolEntryKind,
+) -> String {
     #[cfg(windows)]
     {
-        windows_shim_content(node_exe, tool_launcher, bin)
+        windows_shim_content(node_exe, tool_launcher, bin, kind)
     }
     #[cfg(unix)]
     {
-        unix_shim_content(node_exe, tool_launcher, bin)
+        unix_shim_content(node_exe, tool_launcher, bin, kind)
     }
 }
 
 /// Node 自带 npm-cli.js 相对 `node/` 的路径(unix 在 `lib/` 下,Windows 在根)
 pub fn npm_cli_subpath() -> PathBuf {
-    if cfg!(windows) {
+    npm_cli_subpath_for(cfg!(windows))
+}
+
+/// `npm_cli_subpath` 的显式平台参数版(跨平台纯路径测试与运行时共用一处逻辑)。
+pub fn npm_cli_subpath_for(windows: bool) -> PathBuf {
+    if windows {
         ["node_modules", "npm", "bin", "npm-cli.js"]
             .iter()
             .collect()
@@ -654,32 +756,42 @@ pub fn nvm_install_and_resolve(nvm_path: &Path, version: &str) -> Result<PathBuf
 /// 定位某管理器安装目录下指定版本的 Node,并验证 exe 可执行、版本一致(全平台纯逻辑)。
 ///
 /// - nvm(unix 布局):`<dir>/versions/node/<vX.Y.Z>/bin/node`;
-/// - fnm:`<dir>/node-versions/<vX.Y.Z>/installation/bin/node`;
+/// - fnm:`<dir>/node-versions/<vX.Y.Z>/installation/bin/node`(Windows 无 `bin/`:
+///   `installation/node.exe`,fnm 官方布局——`fnm env` 的 multishell PATH 在 Windows
+///   直接指 installation 目录,与 node_bin_subdir 同一 per-OS 约定);
 /// - nvm-windows:`<dir>/<vX.Y.Z>/node.exe`(版本目录直接在根下,无 versions 包裹)。
 ///
 /// 幂等复用与共用语义都由它承载:命中即「该管理器已装过该版本,无需再装」。
 pub fn resolve_manager_node(dir: &Path, version: &str, kind: ManagerKind) -> Option<PathBuf> {
     let v = format!("v{}", version.trim().trim_start_matches('v'));
-    let exe = if cfg!(windows) && kind == ManagerKind::Nvm {
-        // nvm-windows:NVM_HOME/vX.Y.Z/node.exe
-        dir.join(&v).join(exe_name("node"))
-    } else if kind == ManagerKind::Nvm {
-        dir.join("versions")
-            .join("node")
-            .join(&v)
-            .join(node_bin_subdir())
-            .join(exe_name("node"))
-    } else {
-        dir.join("node-versions")
-            .join(&v)
-            .join("installation")
-            .join(node_bin_subdir())
-            .join(exe_name("node"))
-    };
+    let exe = manager_node_exe_path(dir, &v, kind, cfg!(windows));
     if version_output_of(&exe).as_deref() == Some(v.as_str()) {
         Some(exe)
     } else {
         None
+    }
+}
+
+/// 管理器布局下指定版本 Node exe 的纯路径构造(`v` 为已规范化的 `vX.Y.Z`)。
+/// 平台形态由显式 `windows` 参数给出,bin 子目录有无走 `node_bin_subdir_for`
+/// 这唯一一处 per-OS 逻辑——运行时与跨平台单测共用,不产生第二份布局定义。
+fn manager_node_exe_path(dir: &Path, v: &str, kind: ManagerKind, windows: bool) -> PathBuf {
+    let exe = if windows { "node.exe" } else { "node" };
+    match (kind, windows) {
+        // nvm-windows:NVM_HOME/vX.Y.Z/node.exe(版本目录直接在根下)
+        (ManagerKind::Nvm, true) => dir.join(v).join(exe),
+        (ManagerKind::Nvm, false) => dir
+            .join("versions")
+            .join("node")
+            .join(v)
+            .join(node_bin_subdir_for(false))
+            .join(exe),
+        (ManagerKind::Fnm, w) => dir
+            .join("node-versions")
+            .join(v)
+            .join("installation")
+            .join(node_bin_subdir_for(w))
+            .join(exe),
     }
 }
 
@@ -800,13 +912,40 @@ pub fn nvm_default_version(nvm_dir: &Path) -> Option<String> {
 }
 
 /// fnm 默认安装/数据目录:nvm/fnm 探测、install_fnm 落盘与 InstallFnm 解析共用。
-/// unix 为 `~/.local/share/fnm`;Windows 分派 imp 为 `%LOCALAPPDATA%\fnm`。
+/// FNM_DIR 环境变量优先(fnm 官方配置项);否则平台默认:unix `~/.local/share/fnm`,
+/// Windows `%APPDATA%\fnm`——fnm v1.39.0 经 etcetera Windows 策略的 `data_dir()`
+/// 取 **Roaming**(%APPDATA%),实测(node 装进 Roaming\fnm\node-versions)。
+/// v0.2.0 曾按 `%LOCALAPPDATA%\fnm` 解析:node 装进 Roaming 而解析看 Local,必失败。
 #[cfg(unix)]
 pub fn fnm_default_dir_impl(home: &Path) -> PathBuf {
+    let env = std::env::var_os("FNM_DIR").filter(|s| !s.is_empty());
+    fnm_default_dir_unix_for(home, env.as_deref())
+}
+
+/// unix fnm 默认目录(纯逻辑,FNM_DIR 取值显式注入,可单测)。
+#[cfg(any(unix, test))]
+fn fnm_default_dir_unix_for(home: &Path, fnm_dir_env: Option<&std::ffi::OsStr>) -> PathBuf {
+    if let Some(d) = fnm_dir_env {
+        return PathBuf::from(d);
+    }
     home.join(".local").join("share").join("fnm")
 }
 
-/// Windows:分派 imp(`%LOCALAPPDATA%\fnm`,与 detect/install_fnm 同一目录)
+/// Windows fnm 默认目录(纯逻辑,可单测):FNM_DIR 优先;否则 `%APPDATA%\fnm`
+/// (Roaming——fnm 的真实默认,见 fnm_default_dir_impl 注释)。APPDATA 缺失 → None
+/// (由 imp 回退 `<home>/.fnm`)。
+#[cfg(any(windows, test))]
+pub(super) fn fnm_default_dir_windows_for(
+    appdata: Option<&std::ffi::OsStr>,
+    fnm_dir_env: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    if let Some(d) = fnm_dir_env {
+        return Some(PathBuf::from(d));
+    }
+    appdata.map(|d| PathBuf::from(d).join("fnm"))
+}
+
+/// Windows:分派 imp(`%APPDATA%\fnm`,与 detect/install_fnm 同一目录)
 #[cfg(windows)]
 pub fn fnm_default_dir_impl(home: &Path) -> PathBuf {
     imp::fnm_default_dir(home)
@@ -994,19 +1133,35 @@ pub(super) fn install_fnm_unix(
     println!("已从 Mirror 下载 fnm:{hit}");
 
     fs::create_dir_all(dest_dir)?;
-    let bytes = fs::read(&archive)?;
-    let cursor = io::Cursor::new(bytes);
-    let mut zip = zip::ZipArchive::new(cursor).map_err(|e| format!("fnm zip 损坏:{e}"))?;
-    let mut entry = zip
-        .by_name("fnm")
-        .map_err(|e| format!("fnm zip 中无 `fnm` 条目:{e}"))?;
-    let mut out = fs::File::create(&exe)?;
-    io::copy(&mut entry, &mut out)?;
+    extract_zip_entry(&archive, "fnm", &exe)?;
     fs::set_permissions(&exe, fs::Permissions::from_mode(0o755))?;
     if version_output_of(&exe).is_none() {
         return Err("fnm 解压后自检失败:`fnm --version` 未通过".into());
     }
     Ok(exe)
+}
+
+/// 从 zip 解出单个条目为 dest 文件。返回时写 fd 保证已关闭——这是契约,不是
+/// 顺带行为:调用者紧跟着会 spawn 解出的可执行文件做自检,而 Linux/macOS 内核
+/// 拒绝 exec 仍被(任何进程,含本进程自己)以写方式打开的可执行文件
+/// (execve → ETXTBSY;hiclaw 实机验收据此复现)。写句柄若活着离开本函数,
+/// 自检必败。
+#[cfg(unix)]
+fn extract_zip_entry(
+    archive: &Path,
+    entry_name: &str,
+    dest: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let bytes = fs::read(archive)?;
+    let mut zip =
+        zip::ZipArchive::new(io::Cursor::new(bytes)).map_err(|e| format!("fnm zip 损坏:{e}"))?;
+    let mut entry = zip
+        .by_name(entry_name)
+        .map_err(|e| format!("fnm zip 中无 `{entry_name}` 条目:{e}"))?;
+    let mut out = fs::File::create(dest)?;
+    io::copy(&mut entry, &mut out)?;
+    out.sync_all()?;
+    Ok(())
 }
 
 /// unix 共享:跑一条 fnm 子命令,按绝对路径调可执行(不依赖 PATH);非零退出带 stderr 报错。
@@ -1137,7 +1292,9 @@ pub(super) fn write_shim_impl(
 
     fs::create_dir_all(bin_dir)?;
     let path = bin_dir.join(shim_file_name(bin));
-    fs::write(&path, shim_content(node_exe, tool_launcher, bin))?;
+    // 原生入口(claude-code 2.x 起)不经 Node,shim 直接 exec;JS 入口照旧经 Node
+    let kind = tool_entry_kind(tool_launcher)?;
+    fs::write(&path, shim_content(node_exe, tool_launcher, bin, kind))?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
     Ok(path)
 }
@@ -1282,6 +1439,38 @@ mod tests {
         }
     }
 
+    /// 回归(hiclaw 实机验收):解出的可执行文件必须立即可 exec。若解出方把
+    /// 写 fd 活到调用方 spawn 时,内核 execve 拒绝(ETXTBSY),fnm 解压后自检
+    /// 必败——v0.2.0 的 install_fnm_unix 正是这样,`out` File 随函数作用域
+    /// 结束才关闭,晚于自检。extract_zip_entry 的契约是返回时写 fd 已关闭。
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_entry_leaves_exe_immediately_executable() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("setup-coder-test-zipex-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // 造 zip:单条目 `fnm`,内容是能响应 --version 的假 fnm
+        let mut w = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        w.start_file("fnm", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        w.write_all(b"#!/bin/sh\necho 'fnm 9.9.9 (fake)'\n").unwrap();
+        let archive = dir.join("fnm-linux.zip");
+        fs::write(&archive, w.finish().unwrap().into_inner()).unwrap();
+
+        let exe = dir.join("fnm");
+        extract_zip_entry(&archive, "fnm", &exe).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        // 与 install_fnm_unix 自检同一步:解出后立即 spawn 必须成功
+        assert_eq!(
+            version_output_of(&exe).as_deref(),
+            Some("fnm 9.9.9 (fake)")
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn remove_all_except_keeps_only_the_locked_file() {
         let root = std::env::temp_dir().join(format!("setup-coder-test-rm-{}", std::process::id()));
@@ -1349,19 +1538,39 @@ mod tests {
         assert!(!merged2.contains(";;"));
     }
 
-    /// 工单 #21 去劫持契约:含选定 Node 绝对路径;以它 exec 前缀下包内真实入口 JS
-    /// (tool_launcher 已 canonicalize 为绝对路径);不含任何 PATH 前置。
+    /// 工单 #21 去劫持契约:JS 入口含选定 Node 绝对路径;以它 exec 前缀下包内真实
+    /// 入口 JS(tool_launcher 已 canonicalize 为绝对路径);不含任何 PATH 前置。
     #[test]
     fn unix_shim_execs_chosen_node_against_entry_js() {
         let s = unix_shim_content(
             Path::new("/opt/homebrew/opt/node@22/bin/node"),
             Path::new("/x/.setup-coder/npm/lib/node_modules/@openai/codex/bin/codex.js"),
             "codex",
+            ToolEntryKind::Js,
         );
         assert!(s.starts_with("#!/bin/sh"));
         assert!(s.contains(
             "exec \"/opt/homebrew/opt/node@22/bin/node\" \"/x/.setup-coder/npm/lib/node_modules/@openai/codex/bin/codex.js\" \"$@\""
         ));
+        assert!(!s.contains("export PATH"), "shim 不得前置 node 目录:{s}");
+    }
+
+    /// 原生入口(claude-code 2.x 起,bin 即 ELF/Mach-O 单文件):shim 直接 exec 入口,
+    /// 不经过 Node——`node <二进制>` 会被 Node 当模块加载而失败(hiclaw 实测
+    /// ERR_UNKNOWN_FILE_EXTENSION)。原生二进制自身不依赖 Node,无去劫持问题。
+    #[test]
+    fn unix_shim_execs_native_entry_directly() {
+        let s = unix_shim_content(
+            Path::new("/opt/homebrew/opt/node@22/bin/node"),
+            Path::new("/x/.setup-coder/npm/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"),
+            "claude",
+            ToolEntryKind::Native,
+        );
+        assert!(s.starts_with("#!/bin/sh"));
+        assert!(s.contains(
+            "exec \"/x/.setup-coder/npm/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe\" \"$@\""
+        ));
+        assert!(!s.contains("node@22"), "原生 shim 不得引用 Node:{s}");
         assert!(!s.contains("export PATH"), "shim 不得前置 node 目录:{s}");
     }
 
@@ -1376,14 +1585,15 @@ mod tests {
         }
     }
 
-    /// 工单 #21 去劫持契约(.cmd):含选定 Node 绝对路径;以它执行包内入口 JS;
-    /// 不含任何 PATH 变更。
+    /// 工单 #21 去劫持契约(.cmd):JS 入口含选定 Node 绝对路径;以它执行包内入口
+    /// JS;不含任何 PATH 变更。
     #[test]
     fn windows_shim_execs_chosen_node_against_entry_js() {
         let s = windows_shim_content(
             Path::new(r"C:\Users\u\fnm\node-versions\v22.19.0\installation\node.exe"),
             Path::new(r"C:\Users\u\.setup-coder\npm\node_modules\@openai\codex\bin\codex.js"),
             "codex",
+            ToolEntryKind::Js,
         );
         assert!(s.starts_with("@echo off"));
         assert!(s.contains(
@@ -1393,20 +1603,95 @@ mod tests {
         assert!(!s.contains("set \"PATH="), "shim 不得前置 node 目录:{s}");
     }
 
+    /// 原生 PE 入口(.cmd):shim 直接执行入口,不经过 node.exe。
     #[test]
-    fn sh_launcher_target_parses_npm_bin_stub() {
-        // npm(Pacote)在 Windows 上为全局 bin 写的无扩展名 shell 启动器
-        let text =
-            "#!/bin/sh\nexec node  \"../lib/node_modules/@openai/codex/bin/codex.js\" \"$@\"\n";
-        assert_eq!(
-            sh_launcher_target(text),
-            Some(PathBuf::from(
-                "../lib/node_modules/@openai/codex/bin/codex.js"
-            ))
+    fn windows_shim_execs_native_entry_directly() {
+        let s = windows_shim_content(
+            Path::new(r"C:\Users\u\fnm\node-versions\v22.19.0\installation\node.exe"),
+            Path::new(r"C:\Users\u\.setup-coder\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe"),
+            "claude",
+            ToolEntryKind::Native,
         );
-        // 非启动器内容 / 空目标 → None(由 tool_launcher 报中文错)
-        assert_eq!(sh_launcher_target("garbage"), None);
-        assert_eq!(sh_launcher_target("#!/bin/sh\nexec node \"\" \"$@\""), None);
+        assert!(s.starts_with("@echo off"));
+        assert!(s.contains(
+            r#""C:\Users\u\.setup-coder\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe" %*"#
+        ));
+        assert!(s.contains("exit /b %errorlevel%"));
+        assert!(!s.contains("fnm\\node-versions"), "原生 shim 不得引用 Node:{s}");
+    }
+
+    #[test]
+    fn tool_entry_kind_sniffs_binary_magic() {
+        let dir =
+            std::env::temp_dir().join(format!("setup-coder-test-entrykind-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let cases: &[(&str, &[u8], ToolEntryKind)] = &[
+            ("elf", b"\x7fELF\x02\x01\x01\x00rest", ToolEntryKind::Native),
+            ("pe", b"MZ\x90\x00rest", ToolEntryKind::Native),
+            ("macho64", b"\xfe\xed\xfa\xcfrest", ToolEntryKind::Native),
+            ("macho-fat", b"\xca\xfe\xba\xberest", ToolEntryKind::Native),
+            (
+                "js-shebang",
+                b"#!/usr/bin/env node\nconsole.log(1)\n",
+                ToolEntryKind::Js,
+            ),
+            ("js-bare", b"// entry\nconsole.log(1)\n", ToolEntryKind::Js),
+            ("empty", b"", ToolEntryKind::Js), // 空文件按 JS 处理(与既有行为一致)
+        ];
+        for (name, bytes, want) in cases {
+            let p = dir.join(name);
+            fs::write(&p, bytes).unwrap();
+            assert_eq!(tool_entry_kind(&p).unwrap(), *want, "case {name}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// package_bin_entry(Windows tool_launcher 的事实源):package.json 的 bin
+    /// 字段两种合法形态都解出入口相对路径;缺失/非法 → None(调用方中文报错)。
+    #[test]
+    fn package_bin_entry_reads_string_and_object_forms() {
+        // 字符串形态(bin 名 = 包名):codex
+        let codex = r#"{"name":"@openai/codex","bin":"./bin/codex.js"}"#;
+        assert_eq!(
+            package_bin_entry(codex, "codex"),
+            Some(PathBuf::from("bin/codex.js"))
+        );
+        // 对象形态:claude-code 2.x(原生入口,名字带 .exe 原样返回)
+        let claude = r#"{"name":"@anthropic-ai/claude-code","bin":{"claude":"bin/claude.exe"}}"#;
+        assert_eq!(
+            package_bin_entry(claude, "claude"),
+            Some(PathBuf::from("bin/claude.exe"))
+        );
+        // 对象形态但无此 bin 键 → None;无 bin 字段 → None;空串 → None;非法 JSON → None
+        assert_eq!(package_bin_entry(claude, "codex"), None);
+        assert_eq!(package_bin_entry(r#"{"name":"x"}"#, "x"), None);
+        assert_eq!(package_bin_entry(r#"{"bin":{"x":""}}"#, "x"), None);
+        assert_eq!(package_bin_entry("not json", "x"), None);
+    }
+
+    /// simplify_verbatim_path:盘符绝对路径剥掉 `\\?\` 前缀(写进 .cmd shim 的
+    /// 前提,cmd.exe 不认扩展长度语法);UNC verbatim 与非前缀路径原样保留。
+    #[test]
+    fn simplify_verbatim_strips_drive_prefix_only() {
+        assert_eq!(
+            simplify_verbatim_path(Path::new(r"\\?\C:\Users\u\.setup-coder\npm\x.js")),
+            PathBuf::from(r"C:\Users\u\.setup-coder\npm\x.js")
+        );
+        // UNC verbatim(\\?\UNC\server\share)保留——直接剥会改变语义
+        assert_eq!(
+            simplify_verbatim_path(Path::new(r"\\?\UNC\server\share\x")),
+            PathBuf::from(r"\\?\UNC\server\share\x")
+        );
+        // 非前缀路径原样
+        assert_eq!(
+            simplify_verbatim_path(Path::new(r"C:\plain\x")),
+            PathBuf::from(r"C:\plain\x")
+        );
+        assert_eq!(
+            simplify_verbatim_path(Path::new("/unix/path")),
+            PathBuf::from("/unix/path")
+        );
     }
 
     /// unix tool_launcher:npm 全局 bin 是相对 symlink → canonicalize 为包内入口 JS 的
@@ -1430,13 +1715,59 @@ mod tests {
         )
         .unwrap();
 
-        let resolved = tool_launcher(&bin_dir, "codex").unwrap();
+        let resolved = tool_launcher(&bin_dir, "@openai/codex", "codex").unwrap();
         // 解析到真实入口 JS(经 canonicalize;macOS /var→/private/var 已归一)
         assert_eq!(resolved, fs::canonicalize(&entry).unwrap());
         assert!(resolved.is_absolute());
         // 缺失/断链 → 中文报错而非 panic
-        assert!(tool_launcher(&bin_dir, "nonexistent").is_err());
+        assert!(tool_launcher(&bin_dir, "@openai/codex", "nonexistent").is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// write_shim_impl 接线:按入口魔数分流 shim 形态——原生入口(ELF)直接 exec
+    /// (不经 Node,hiclaw 实测 claude-code 2.x 的 `node claude.exe` 必败);JS 入口
+    /// 照旧经选定 Node。重跑同一 bin 换形态时覆盖旧 shim。
+    #[cfg(unix)]
+    #[test]
+    fn write_shim_impl_picks_exec_form_by_entry_magic() {
+        let dir =
+            std::env::temp_dir().join(format!("setup-coder-test-wshim-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let bin_dir = dir.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let node = dir.join("node/bin/node");
+        fs::create_dir_all(node.parent().unwrap()).unwrap();
+        fs::write(&node, "fake-node").unwrap();
+        let entry = dir.join("pkg/bin/tool-entry");
+        fs::create_dir_all(entry.parent().unwrap()).unwrap();
+
+        // JS 入口 → 经 Node 解释
+        fs::write(&entry, "#!/usr/bin/env node\nconsole.log('v1')\n").unwrap();
+        let shim = write_shim_impl(&bin_dir, &node, &entry, "tool").unwrap();
+        let s = fs::read_to_string(&shim).unwrap();
+        assert!(
+            s.contains(&format!(
+                "exec \"{}\" \"{}\" \"$@\"",
+                node.display(),
+                entry.display()
+            )),
+            "JS 入口 shim 应经 Node:{s}"
+        );
+
+        // 同名 bin 换原生入口(ELF 魔数)→ 直接 exec,不再引用 Node;重跑覆盖旧 shim
+        fs::write(&entry, b"\x7fELF\x02\x01\x01\x00fake-native").unwrap();
+        let shim2 = write_shim_impl(&bin_dir, &node, &entry, "tool").unwrap();
+        assert_eq!(shim2, shim, "同一 bin 重跑应覆盖同一 shim 路径");
+        let s2 = fs::read_to_string(&shim2).unwrap();
+        assert!(
+            s2.contains(&format!("exec \"{}\" \"$@\"", entry.display())),
+            "原生入口 shim 应直接 exec:{s2}"
+        );
+        assert!(
+            !s2.contains(&format!("\"{}\"", node.display())),
+            "原生 shim 不得引用 Node:{s2}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1691,10 +2022,72 @@ mod tests {
     #[test]
     fn fnm_default_dir_is_under_home() {
         assert_eq!(
-            fnm_default_dir_impl(Path::new("/home/u")),
+            fnm_default_dir_unix_for(Path::new("/home/u"), None),
             Path::new("/home/u/.local/share/fnm")
         );
     }
+
+    /// fnm 默认数据目录(F1):FNM_DIR 优先;unix 默认 `~/.local/share/fnm`;
+    /// Windows 默认是 **%APPDATA%\fnm(Roaming)**——fnm v1.39.0 经 etcetera
+    /// `data_dir()` 取 Roaming(实机证据:node 装进 Roaming\fnm\node-versions,
+    /// 而 v0.2.0 按 %LOCALAPPDATA% 解析,必「未解析到 Node」)。
+    #[test]
+    fn fnm_default_dir_prefers_fnm_dir_env_and_roaming_appdata() {
+        use std::ffi::OsStr;
+        // FNM_DIR 优先(fnm 官方配置项)
+        assert_eq!(
+            fnm_default_dir_unix_for(Path::new("/h"), Some(OsStr::new("/x/fnm"))),
+            PathBuf::from("/x/fnm")
+        );
+        assert_eq!(
+            fnm_default_dir_windows_for(None, Some(OsStr::new(r"D:\fnm"))),
+            Some(PathBuf::from(r"D:\fnm"))
+        );
+        // Windows 默认:Roaming %APPDATA%\fnm,不是 %LOCALAPPDATA%\fnm
+        let roaming = r"C:\Users\u\AppData\Roaming";
+        assert_eq!(
+            fnm_default_dir_windows_for(Some(OsStr::new(roaming)), None),
+            Some(PathBuf::from(roaming).join("fnm"))
+        );
+        assert_eq!(fnm_default_dir_windows_for(None, None), None);
+    }
+
+    /// 管理器布局纯路径构造(F1):两个管理器 × 两种平台形态。bin 子目录的有无
+    /// 与 node_bin_subdir_for 同一 per-OS 逻辑——fnm Windows 无 bin/(官方布局:
+    /// `fnm env` 的 multishell PATH 直接指 installation),nvm-windows 版本目录
+    /// 直接挂根。
+    #[test]
+    fn manager_node_exe_path_covers_both_managers_both_oses() {
+        let dir = Path::new("/m");
+        assert_eq!(
+            manager_node_exe_path(dir, "v22.19.0", ManagerKind::Fnm, false),
+            dir.join("node-versions")
+                .join("v22.19.0")
+                .join("installation")
+                .join("bin")
+                .join("node")
+        );
+        assert_eq!(
+            manager_node_exe_path(dir, "v22.19.0", ManagerKind::Fnm, true),
+            dir.join("node-versions")
+                .join("v22.19.0")
+                .join("installation")
+                .join("node.exe")
+        );
+        assert_eq!(
+            manager_node_exe_path(dir, "v22.19.0", ManagerKind::Nvm, false),
+            dir.join("versions")
+                .join("node")
+                .join("v22.19.0")
+                .join("bin")
+                .join("node")
+        );
+        assert_eq!(
+            manager_node_exe_path(dir, "v22.19.0", ManagerKind::Nvm, true),
+            dir.join("v22.19.0").join("node.exe")
+        );
+    }
+
     /// resolve_manager_node(工单 #20):按管理器布局定位 node exe,验证版本匹配才命中;
     /// 版本不符 / 缺失 → None(幂等复用判定的反例)。
     #[cfg(unix)]

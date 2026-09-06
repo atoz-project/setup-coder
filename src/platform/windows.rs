@@ -139,7 +139,9 @@ pub fn write_shim(
 ) -> io::Result<PathBuf> {
     fs::create_dir_all(bin_dir)?;
     let path = bin_dir.join(super::shim_file_name(bin));
-    fs::write(&path, super::shim_content(node_exe, tool_launcher, bin))?;
+    // 原生入口(claude-code 2.x 起)不经 Node,shim 直接执行;JS 入口照旧经 Node
+    let kind = super::tool_entry_kind(tool_launcher)?;
+    fs::write(&path, super::shim_content(node_exe, tool_launcher, bin, kind))?;
     Ok(path)
 }
 
@@ -230,7 +232,7 @@ fn extract_zip(archive: &Path, dest_dir: &Path, strip_top: bool) -> io::Result<(
 
 /// 探测 Node 来源事实(Windows):裸 Node 走 PATH + `node --version`;
 /// nvm 走 NVM_DIR 环境变量 + `%APPDATA%\nvm`(nvm-windows);fnm 走 PATH +
-/// `%LOCALAPPDATA%\fnm` + PowerShell profile 钩子痕迹(覆盖「已装未 source」)。
+/// `%APPDATA%\fnm`(fnm 真实默认,Roaming)+ PowerShell profile 钩子痕迹(覆盖「已装未 source」)。
 
 pub fn detect_node_facts() -> crate::node_plan::NodeFacts {
     crate::node_plan::NodeFacts {
@@ -240,9 +242,13 @@ pub fn detect_node_facts() -> crate::node_plan::NodeFacts {
     }
 }
 
-/// fnm 默认数据目录:`%LOCALAPPDATA%\fnm`(fnm 官方安装脚本默认)。
+/// fnm 默认数据目录:FNM_DIR 优先(fnm 官方配置项);否则 `%APPDATA%\fnm`——
+/// fnm v1.39.0 的真实默认(etcetera Windows 策略 `data_dir()` = Roaming;
+/// 实机证据:node 装进 Roaming\fnm\node-versions\v22.19.0)。不是 %LOCALAPPDATA%。
 fn fnm_default_dir_windows() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("fnm"))
+    let appdata = std::env::var_os("APPDATA").filter(|s| !s.is_empty());
+    let fnm_dir = std::env::var_os("FNM_DIR").filter(|s| !s.is_empty());
+    super::fnm_default_dir_windows_for(appdata.as_deref(), fnm_dir.as_deref())
 }
 
 /// 裸 Node:PATH 上的 `node.exe`,`--version` 解析版本。
@@ -304,8 +310,9 @@ fn detect_fnm_windows() -> Option<(semver::Version, PathBuf)> {
 }
 
 /// fnm 默认安装/数据目录(Windows 平台定义,与 unix 的 `~/.local/share/fnm` 同位):
-/// `%LOCALAPPDATA%\fnm`(fnm 官方安装脚本默认)。node_source 的 InstallFnm 解析接缝
-/// 与探测、install_fnm 落盘共用此目录。LOCALAPPDATA 缺失时回退 `<home>/.fnm`。
+/// `%APPDATA%\fnm`(fnm 真实默认:Roaming,见 fnm_default_dir_windows)。node_source
+/// 的 InstallFnm 解析接缝与探测、install_fnm 落盘共用此目录。APPDATA 缺失时回退
+/// `<home>/.fnm`。
 pub fn fnm_default_dir(home: &Path) -> PathBuf {
     fnm_default_dir_windows().unwrap_or_else(|| home.join(".fnm"))
 }
