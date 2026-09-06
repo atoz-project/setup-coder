@@ -10,7 +10,7 @@
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use crate::node_plan::{self, NodeFacts, NodePlan};
@@ -214,25 +214,30 @@ fn use_fnm(
 
 /// 新装 fnm 兜底(工单 #22):无 Node 且无版本管理器的零输入路径。
 ///
-/// 步骤:经镜像链下载 fnm 到平台默认数据目录(unix `~/.local/share/fnm`,与探测
-/// `detect_node_facts` 同一定义——重跑探测即命中 UseFnm 分支,幂等成立)→
-/// `fnm install <floor>` + `fnm default <floor>` → 幂等注入 fnm shell 钩子(记为
-/// FnmHook 注入,uninstall 按它精确回滚)→ 落账。
+/// 步骤:经镜像链下载 fnm 到平台默认数据目录(unix `~/.local/share/fnm`,
+/// Windows `%APPDATA%\fnm`,均与探测 `detect_node_facts` 同一定义——重跑探测
+/// 即命中 UseFnm 分支,幂等成立)→ `fnm install <floor>` + `fnm default <floor>`
+/// → 幂等注入 fnm shell 钩子(记为 FnmHook 注入,uninstall 按它精确回滚)→ 落账。
 ///
 /// 落账模型(ADR-0003):虽由 setup-coder 代装,来源仍记 user_fnm(没有也不该有
 /// prefix 来源值——Node 永不落前缀);「是否由 setup-coder 代装 fnm」由 state.json
 /// 里的 FnmHook rc 注入记录区分,不靠来源枚举。
+///
+/// 落账时机(F3):钩子注入与 Node 落账后【立即】各存一次 state.json,不等
+/// install 结尾——中间任一步失败(如 Node 解析失败),部分清单已在盘上,
+/// uninstall 仍能按记录精确回滚钩子并打印代装 fnm 保留提示。
 fn install_fnm_branch(
     floor: &semver::Version,
     state: &mut State,
 ) -> Result<NodeSource, Box<dyn Error>> {
     let home = std::env::home_dir()
         .ok_or_else(|| io_error("无法确定用户家目录(HOME 未设置),无法安装 fnm"))?;
+    let prefix = Prefix::home()?;
     let fnm_dir = platform::fnm_default_dir_impl(&home);
     let spec = floor.to_string();
 
     // 1. 装 fnm 本体(幂等:已能跑则复用;镜像容错链下载)
-    let fnm_exe = platform::install_fnm(&prefix_cache_dir()?, &fnm_dir)?;
+    let fnm_exe = platform::install_fnm(&prefix.cache_dir(), &fnm_dir)?;
     println!(
         "已安装 fnm {}:{}",
         fnm_version_of(&fnm_exe),
@@ -253,6 +258,10 @@ fn install_fnm_branch(
     }
     println!("新开终端即可获得 node/npm(fnm 钩子生效)");
 
+    // F3:钩子已写进 rc,先把部分清单落盘——后续步骤失败时 uninstall 有账可回滚
+    fs::create_dir_all(prefix.root())?;
+    state.save(&prefix)?;
+
     // 4. 解析 + 落账:与 UseFnm 同一条 resolve_manager_node → from_exe(实体化)路径
     let node = node_source::for_plan(&NodePlan::InstallFnm {
         version: floor.clone(),
@@ -262,6 +271,8 @@ fn install_fnm_branch(
         version: node.version().to_string(),
         exe: Some(node.exe().to_path_buf()),
     });
+    // F3:Node 落账同样立即落盘(后续 Tool 安装失败时清单仍如实记录 Node 来源)
+    state.save(&prefix)?;
     Ok(node)
 }
 
@@ -271,11 +282,6 @@ fn fnm_version_of(fnm_exe: &Path) -> String {
         .and_then(|out| platform::parse_fnm_version(&out))
         .map(|v| format!("v{v}"))
         .unwrap_or_else(|| "(版本未知)".to_string())
-}
-
-/// 前缀下载缓存目录(经 Prefix::home;fnm zip 缓存进前缀,可整删)
-fn prefix_cache_dir() -> Result<PathBuf, Box<dyn Error>> {
-    Ok(Prefix::home()?.cache_dir())
 }
 
 fn io_error(msg: &str) -> std::io::Error {
@@ -775,6 +781,73 @@ mod tests {
                 unreachable!()
             };
             assert!(!fs::read_to_string(file).unwrap().contains("fnm env"));
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// F3 回归:InstallFnm 在钩子注入【之后】失败(复刻 v0.2.0 Windows 实机:
+    /// fnm 装 Node 成功但解析失败)时,部分清单必须已在盘上——state.json 含
+    /// FnmHook 记录,uninstall 方能按记录精确回滚钩子。桩 fnm 的 `install`
+    /// 不落 node exe,Node 解析必败;断言报错且盘上清单带钩子记录。
+    #[cfg(unix)]
+    #[test]
+    fn install_fnm_failure_after_hook_injection_still_saves_partial_manifest() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "setup-coder-test-installfnm-partial-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let _home = crate::test_util::ScopedHome::set(&root);
+        let tools: Vec<&Tool> = registry::all().iter().collect();
+
+        // 桩 fnm:--version 报版本(install_fnm 幂等复用命中);install 不落 node
+        // exe(后续解析必失败,正是 F1 实机形态);其余子命令 no-op。
+        let fnm_dir = root.join(".local/share/fnm");
+        fs::create_dir_all(&fnm_dir).unwrap();
+        let fnm_stub = fnm_dir.join("fnm");
+        let script = "#!/bin/sh\n\
+             case \"$1\" in\n\
+             --version) echo 'fnm 1.39.0' ;;\n\
+             install) : ;;\n\
+             esac\n";
+        fs::write(&fnm_stub, script).unwrap();
+        fs::set_permissions(&fnm_stub, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let facts = NodeFacts {
+            bare_node: None,
+            nvm: None,
+            fnm: None,
+        };
+        let mut state = State::default();
+        let result = decide_node_with(&tools, &facts, &mut state);
+        let err = match result {
+            Err(e) => e,
+            Ok(node) => panic!("Node 未落盘,解析应失败,却成功:{node:?}"),
+        };
+        assert!(
+            err.to_string().contains("未解析到"),
+            "错误应指向管理器下解析失败:{err}"
+        );
+
+        // 部分清单已在盘上:含 FnmHook 记录(uninstall 的回滚依据),node 未落账
+        let prefix = Prefix::home().unwrap();
+        let on_disk = State::load(&prefix).expect("失败后 state.json 必须已存在(F3)");
+        assert!(on_disk.node.is_none(), "失败在落账前,node 应为空");
+        let hook_records = on_disk
+            .path_injections
+            .iter()
+            .filter(|i| matches!(i, crate::prefix::PathInjection::FnmHook { .. }))
+            .count();
+        assert!(hook_records > 0, "盘上清单必须含 FnmHook 记录");
+        // 每条记录的钩子行确实曾写入对应 rc 文件(回滚有靶子)
+        for injection in &on_disk.path_injections {
+            let crate::prefix::PathInjection::FnmHook { file, line } = injection else {
+                panic!("InstallFnm 只记 FnmHook 注入:{injection:?}");
+            };
+            let content = fs::read_to_string(file).unwrap();
+            assert!(content.contains(line.trim()), "{} 应有钩子行", file.display());
         }
         fs::remove_dir_all(&root).unwrap();
     }
