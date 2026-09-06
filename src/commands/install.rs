@@ -361,7 +361,7 @@ fn install_tool(
 
     // 去劫持契约(工单 #21):shim 以选定 Node 的绝对路径 exec Tool 入口,
     // 不再把 node bin 目录前置进 PATH;重跑覆写旧形态 shim。
-    let launcher = platform::tool_launcher(&prefix.npm_bin_dir(), tool.bin)?;
+    let launcher = platform::tool_launcher(&prefix.npm_bin_dir(), tool.package, tool.bin)?;
     let shim = platform::write_shim(&prefix.bin_dir(), node.exe(), &launcher, tool.bin)?;
 
     // 冒烟:Installed = 能启动并报出版本号(CONTEXT.md)

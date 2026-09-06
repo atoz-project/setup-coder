@@ -283,9 +283,10 @@ fn windows_shim_content(
 /// `../lib/node_modules/@openai/codex/bin/codex.js`;入口可能是 JS,也可能是
 /// claude-code 2.x 起的原生二进制,由 `tool_entry_kind` 嗅探区分);node 以参数
 /// 打开时相对进程 cwd 解析,会断链,故此处 canonicalize 为绝对路径。
-/// npm bin 缺失/断链时报中文错。
+/// npm bin 缺失/断链时报中文错。`package` 与 Windows 签名对齐(unix 经 symlink
+/// 解析,无需使用)。
 #[cfg(unix)]
-pub fn tool_launcher(npm_bin_dir: &Path, bin: &str) -> io::Result<PathBuf> {
+pub fn tool_launcher(npm_bin_dir: &Path, _package: &str, bin: &str) -> io::Result<PathBuf> {
     let launcher = npm_bin_dir.join(bin);
     fs::canonicalize(&launcher).map_err(|e| {
         io::Error::new(
@@ -297,54 +298,57 @@ pub fn tool_launcher(npm_bin_dir: &Path, bin: &str) -> io::Result<PathBuf> {
 
 /// Windows 的 shim 目标:包内入口的绝对路径(JS 或原生 PE,由 `tool_entry_kind` 嗅探)。
 ///
-/// 从 npm 全局 bin 的无扩展名 shell 启动器(纯文本,首行 shebang)解析出
-/// symlink 目标(Pacote 写的相对路径,如 `../lib/node_modules/<pkg>/cli.js`),
-/// canonicalize 为绝对路径;解析失败给出指向具体文件的中文报错(install 快速失败)。
+/// 直接读包的 package.json `bin` 字段定位入口——npm 全局 bin 的 shim 文本模板
+/// 随 npm 版本漂移(cmd-shim 是多行 `$basedir` 模板,并非旧单行 `exec node "…"`;
+/// 曾按单行模板解析,Windows 实机必「npm 全局 bin 启动器格式无法识别」),
+/// package.json 是唯一稳定的机器可读事实。Windows 的 npm 全局根即 <npm_bin_dir>
+/// 本身(无 bin/ 子层),包落在其 node_modules/ 下。
 #[cfg(windows)]
-pub fn tool_launcher(npm_bin_dir: &Path, bin: &str) -> io::Result<PathBuf> {
-    let launcher = npm_bin_dir.join(bin);
-    let text = fs::read_to_string(&launcher).map_err(|e| {
+pub fn tool_launcher(npm_bin_dir: &Path, package: &str, bin: &str) -> io::Result<PathBuf> {
+    let pkg_dir = npm_bin_dir.join("node_modules").join(package);
+    let pkg_json_path = pkg_dir.join("package.json");
+    let text = fs::read_to_string(&pkg_json_path).map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!("读取 npm 全局 bin 启动器失败:{}:{e}", launcher.display()),
+            format!("读取 Tool 包清单失败:{}:{e}", pkg_json_path.display()),
         )
     })?;
-    let target = sh_launcher_target(&text).ok_or_else(|| {
+    let rel = package_bin_entry(&text, bin).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("npm 全局 bin 启动器格式无法识别:{}", launcher.display()),
-        )
-    })?;
-    let entry = fs::canonicalize(npm_bin_dir.join(&target)).map_err(|e| {
-        io::Error::new(
-            e.kind(),
             format!(
-                "解析 Tool 入口失败:{}:{e}",
-                npm_bin_dir.join(&target).display()
+                "Tool 包 {package} 的 package.json 无 `{bin}` 入口:{}",
+                pkg_json_path.display()
             ),
         )
     })?;
-    Ok(entry)
+    let entry = pkg_dir.join(&rel);
+    fs::canonicalize(&entry).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("解析 Tool 入口失败:{}:{e}", entry.display()),
+        )
+    })
 }
 
-/// 解析 npm 全局 bin 的 sh 启动器文本:shebang + 一行 exec。
-/// Pacote 在 Windows 上把 symlink 目标(相对路径)落为这样的文本文件。
-/// 两种形态:JS 入口 `exec node "<目标>" "$@"`;原生入口(bin-links 对无
-/// shebang 的目标不再经 node)`exec "<目标>" "$@"`。这里只解目标路径,
-/// 是否经 Node 由 `tool_entry_kind` 对解出的入口文件做魔数嗅探决定。
+/// 从 package.json 文本解出指定 bin 的入口相对路径(纯逻辑,可单测)。
+/// 两种合法形态:`"bin": "./cli.js"`(字符串,bin 名即包名)与
+/// `"bin": {"<name>": "<path>"}`(对象,按 bin 名取)。剥离 `./` 前缀;
+/// 入口缺失/形态非法 → None(调用方报中文错,install 快速失败)。
 #[cfg(any(windows, test))]
-fn sh_launcher_target(text: &str) -> Option<PathBuf> {
-    let line = text.lines().nth(1)?.trim();
-    let rest = line.strip_prefix("exec ")?.trim_start();
-    let rest = match rest.strip_prefix("node") {
-        Some(after) if after.trim_start().starts_with('"') => after.trim_start(),
-        _ => rest,
+fn package_bin_entry(package_json: &str, bin: &str) -> Option<PathBuf> {
+    let json: serde_json::Value = serde_json::from_str(package_json).ok()?;
+    let field = json.get("bin")?;
+    let rel = match field {
+        serde_json::Value::String(s) => s.as_str(),
+        serde_json::Value::Object(map) => map.get(bin)?.as_str()?,
+        _ => return None,
     };
-    let target = rest.strip_prefix('"')?.split('"').next()?;
-    if target.is_empty() {
+    let rel = rel.strip_prefix("./").unwrap_or(rel);
+    if rel.is_empty() {
         return None;
     }
-    Some(PathBuf::from(target))
+    Some(PathBuf::from(rel))
 }
 
 /// 当前平台的 shim 内容(供薄接缝落盘与单测断言)。
@@ -1619,30 +1623,27 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// package_bin_entry(Windows tool_launcher 的事实源):package.json 的 bin
+    /// 字段两种合法形态都解出入口相对路径;缺失/非法 → None(调用方中文报错)。
     #[test]
-    fn sh_launcher_target_parses_npm_bin_stub() {
-        // npm(Pacote)在 Windows 上为全局 bin 写的无扩展名 shell 启动器
-        let text =
-            "#!/bin/sh\nexec node  \"../lib/node_modules/@openai/codex/bin/codex.js\" \"$@\"\n";
+    fn package_bin_entry_reads_string_and_object_forms() {
+        // 字符串形态(bin 名 = 包名):codex
+        let codex = r#"{"name":"@openai/codex","bin":"./bin/codex.js"}"#;
         assert_eq!(
-            sh_launcher_target(text),
-            Some(PathBuf::from(
-                "../lib/node_modules/@openai/codex/bin/codex.js"
-            ))
+            package_bin_entry(codex, "codex"),
+            Some(PathBuf::from("bin/codex.js"))
         );
-        // 原生入口(bin-links 对无 shebang 的目标):exec 行不带 node
-        let native =
-            "#!/bin/sh\nexec  \"../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe\" \"$@\"\n";
+        // 对象形态:claude-code 2.x(原生入口,名字带 .exe 原样返回)
+        let claude = r#"{"name":"@anthropic-ai/claude-code","bin":{"claude":"bin/claude.exe"}}"#;
         assert_eq!(
-            sh_launcher_target(native),
-            Some(PathBuf::from(
-                "../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
-            ))
+            package_bin_entry(claude, "claude"),
+            Some(PathBuf::from("bin/claude.exe"))
         );
-        // 非启动器内容 / 空目标 → None(由 tool_launcher 报中文错)
-        assert_eq!(sh_launcher_target("garbage"), None);
-        assert_eq!(sh_launcher_target("#!/bin/sh\nexec node \"\" \"$@\""), None);
-        assert_eq!(sh_launcher_target("#!/bin/sh\nexec \"\" \"$@\""), None);
+        // 对象形态但无此 bin 键 → None;无 bin 字段 → None;空串 → None;非法 JSON → None
+        assert_eq!(package_bin_entry(claude, "codex"), None);
+        assert_eq!(package_bin_entry(r#"{"name":"x"}"#, "x"), None);
+        assert_eq!(package_bin_entry(r#"{"bin":{"x":""}}"#, "x"), None);
+        assert_eq!(package_bin_entry("not json", "x"), None);
     }
 
     /// unix tool_launcher:npm 全局 bin 是相对 symlink → canonicalize 为包内入口 JS 的
@@ -1666,12 +1667,12 @@ mod tests {
         )
         .unwrap();
 
-        let resolved = tool_launcher(&bin_dir, "codex").unwrap();
+        let resolved = tool_launcher(&bin_dir, "@openai/codex", "codex").unwrap();
         // 解析到真实入口 JS(经 canonicalize;macOS /var→/private/var 已归一)
         assert_eq!(resolved, fs::canonicalize(&entry).unwrap());
         assert!(resolved.is_absolute());
         // 缺失/断链 → 中文报错而非 panic
-        assert!(tool_launcher(&bin_dir, "nonexistent").is_err());
+        assert!(tool_launcher(&bin_dir, "@openai/codex", "nonexistent").is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 
