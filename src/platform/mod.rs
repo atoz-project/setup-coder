@@ -33,9 +33,11 @@ use windows as imp;
 // 纯逻辑(全平台可编译,单测覆盖)
 // ---------------------------------------------------------------------------
 
-/// Node 可执行文件相对其解压根目录的子目录(unix `bin/`,Windows 根目录)
-pub const fn node_bin_subdir() -> &'static str {
-    if cfg!(windows) {
+/// Node 可执行文件相对其解压根目录的子目录(unix `bin/`,Windows 根目录)。
+/// 管理器布局的纯路径构造(跨平台单测断言两种形态)与运行时 `cfg!(windows)`
+/// 调用方共用这唯一一处 per-OS 逻辑。
+pub const fn node_bin_subdir_for(windows: bool) -> &'static str {
+    if windows {
         ""
     } else {
         "bin"
@@ -721,32 +723,42 @@ pub fn nvm_install_and_resolve(nvm_path: &Path, version: &str) -> Result<PathBuf
 /// 定位某管理器安装目录下指定版本的 Node,并验证 exe 可执行、版本一致(全平台纯逻辑)。
 ///
 /// - nvm(unix 布局):`<dir>/versions/node/<vX.Y.Z>/bin/node`;
-/// - fnm:`<dir>/node-versions/<vX.Y.Z>/installation/bin/node`;
+/// - fnm:`<dir>/node-versions/<vX.Y.Z>/installation/bin/node`(Windows 无 `bin/`:
+///   `installation/node.exe`,fnm 官方布局——`fnm env` 的 multishell PATH 在 Windows
+///   直接指 installation 目录,与 node_bin_subdir 同一 per-OS 约定);
 /// - nvm-windows:`<dir>/<vX.Y.Z>/node.exe`(版本目录直接在根下,无 versions 包裹)。
 ///
 /// 幂等复用与共用语义都由它承载:命中即「该管理器已装过该版本,无需再装」。
 pub fn resolve_manager_node(dir: &Path, version: &str, kind: ManagerKind) -> Option<PathBuf> {
     let v = format!("v{}", version.trim().trim_start_matches('v'));
-    let exe = if cfg!(windows) && kind == ManagerKind::Nvm {
-        // nvm-windows:NVM_HOME/vX.Y.Z/node.exe
-        dir.join(&v).join(exe_name("node"))
-    } else if kind == ManagerKind::Nvm {
-        dir.join("versions")
-            .join("node")
-            .join(&v)
-            .join(node_bin_subdir())
-            .join(exe_name("node"))
-    } else {
-        dir.join("node-versions")
-            .join(&v)
-            .join("installation")
-            .join(node_bin_subdir())
-            .join(exe_name("node"))
-    };
+    let exe = manager_node_exe_path(dir, &v, kind, cfg!(windows));
     if version_output_of(&exe).as_deref() == Some(v.as_str()) {
         Some(exe)
     } else {
         None
+    }
+}
+
+/// 管理器布局下指定版本 Node exe 的纯路径构造(`v` 为已规范化的 `vX.Y.Z`)。
+/// 平台形态由显式 `windows` 参数给出,bin 子目录有无走 `node_bin_subdir_for`
+/// 这唯一一处 per-OS 逻辑——运行时与跨平台单测共用,不产生第二份布局定义。
+fn manager_node_exe_path(dir: &Path, v: &str, kind: ManagerKind, windows: bool) -> PathBuf {
+    let exe = if windows { "node.exe" } else { "node" };
+    match (kind, windows) {
+        // nvm-windows:NVM_HOME/vX.Y.Z/node.exe(版本目录直接在根下)
+        (ManagerKind::Nvm, true) => dir.join(v).join(exe),
+        (ManagerKind::Nvm, false) => dir
+            .join("versions")
+            .join("node")
+            .join(v)
+            .join(node_bin_subdir_for(false))
+            .join(exe),
+        (ManagerKind::Fnm, w) => dir
+            .join("node-versions")
+            .join(v)
+            .join("installation")
+            .join(node_bin_subdir_for(w))
+            .join(exe),
     }
 }
 
@@ -867,13 +879,40 @@ pub fn nvm_default_version(nvm_dir: &Path) -> Option<String> {
 }
 
 /// fnm 默认安装/数据目录:nvm/fnm 探测、install_fnm 落盘与 InstallFnm 解析共用。
-/// unix 为 `~/.local/share/fnm`;Windows 分派 imp 为 `%LOCALAPPDATA%\fnm`。
+/// FNM_DIR 环境变量优先(fnm 官方配置项);否则平台默认:unix `~/.local/share/fnm`,
+/// Windows `%APPDATA%\fnm`——fnm v1.39.0 经 etcetera Windows 策略的 `data_dir()`
+/// 取 **Roaming**(%APPDATA%),实测(node 装进 Roaming\fnm\node-versions)。
+/// v0.2.0 曾按 `%LOCALAPPDATA%\fnm` 解析:node 装进 Roaming 而解析看 Local,必失败。
 #[cfg(unix)]
 pub fn fnm_default_dir_impl(home: &Path) -> PathBuf {
+    let env = std::env::var_os("FNM_DIR").filter(|s| !s.is_empty());
+    fnm_default_dir_unix_for(home, env.as_deref())
+}
+
+/// unix fnm 默认目录(纯逻辑,FNM_DIR 取值显式注入,可单测)。
+#[cfg(any(unix, test))]
+fn fnm_default_dir_unix_for(home: &Path, fnm_dir_env: Option<&std::ffi::OsStr>) -> PathBuf {
+    if let Some(d) = fnm_dir_env {
+        return PathBuf::from(d);
+    }
     home.join(".local").join("share").join("fnm")
 }
 
-/// Windows:分派 imp(`%LOCALAPPDATA%\fnm`,与 detect/install_fnm 同一目录)
+/// Windows fnm 默认目录(纯逻辑,可单测):FNM_DIR 优先;否则 `%APPDATA%\fnm`
+/// (Roaming——fnm 的真实默认,见 fnm_default_dir_impl 注释)。APPDATA 缺失 → None
+/// (由 imp 回退 `<home>/.fnm`)。
+#[cfg(any(windows, test))]
+pub(super) fn fnm_default_dir_windows_for(
+    appdata: Option<&std::ffi::OsStr>,
+    fnm_dir_env: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    if let Some(d) = fnm_dir_env {
+        return Some(PathBuf::from(d));
+    }
+    appdata.map(|d| PathBuf::from(d).join("fnm"))
+}
+
+/// Windows:分派 imp(`%APPDATA%\fnm`,与 detect/install_fnm 同一目录)
 #[cfg(windows)]
 pub fn fnm_default_dir_impl(home: &Path) -> PathBuf {
     imp::fnm_default_dir(home)
@@ -1929,10 +1968,72 @@ mod tests {
     #[test]
     fn fnm_default_dir_is_under_home() {
         assert_eq!(
-            fnm_default_dir_impl(Path::new("/home/u")),
+            fnm_default_dir_unix_for(Path::new("/home/u"), None),
             Path::new("/home/u/.local/share/fnm")
         );
     }
+
+    /// fnm 默认数据目录(F1):FNM_DIR 优先;unix 默认 `~/.local/share/fnm`;
+    /// Windows 默认是 **%APPDATA%\fnm(Roaming)**——fnm v1.39.0 经 etcetera
+    /// `data_dir()` 取 Roaming(实机证据:node 装进 Roaming\fnm\node-versions,
+    /// 而 v0.2.0 按 %LOCALAPPDATA% 解析,必「未解析到 Node」)。
+    #[test]
+    fn fnm_default_dir_prefers_fnm_dir_env_and_roaming_appdata() {
+        use std::ffi::OsStr;
+        // FNM_DIR 优先(fnm 官方配置项)
+        assert_eq!(
+            fnm_default_dir_unix_for(Path::new("/h"), Some(OsStr::new("/x/fnm"))),
+            PathBuf::from("/x/fnm")
+        );
+        assert_eq!(
+            fnm_default_dir_windows_for(None, Some(OsStr::new(r"D:\fnm"))),
+            Some(PathBuf::from(r"D:\fnm"))
+        );
+        // Windows 默认:Roaming %APPDATA%\fnm,不是 %LOCALAPPDATA%\fnm
+        let roaming = r"C:\Users\u\AppData\Roaming";
+        assert_eq!(
+            fnm_default_dir_windows_for(Some(OsStr::new(roaming)), None),
+            Some(PathBuf::from(roaming).join("fnm"))
+        );
+        assert_eq!(fnm_default_dir_windows_for(None, None), None);
+    }
+
+    /// 管理器布局纯路径构造(F1):两个管理器 × 两种平台形态。bin 子目录的有无
+    /// 与 node_bin_subdir_for 同一 per-OS 逻辑——fnm Windows 无 bin/(官方布局:
+    /// `fnm env` 的 multishell PATH 直接指 installation),nvm-windows 版本目录
+    /// 直接挂根。
+    #[test]
+    fn manager_node_exe_path_covers_both_managers_both_oses() {
+        let dir = Path::new("/m");
+        assert_eq!(
+            manager_node_exe_path(dir, "v22.19.0", ManagerKind::Fnm, false),
+            dir.join("node-versions")
+                .join("v22.19.0")
+                .join("installation")
+                .join("bin")
+                .join("node")
+        );
+        assert_eq!(
+            manager_node_exe_path(dir, "v22.19.0", ManagerKind::Fnm, true),
+            dir.join("node-versions")
+                .join("v22.19.0")
+                .join("installation")
+                .join("node.exe")
+        );
+        assert_eq!(
+            manager_node_exe_path(dir, "v22.19.0", ManagerKind::Nvm, false),
+            dir.join("versions")
+                .join("node")
+                .join("v22.19.0")
+                .join("bin")
+                .join("node")
+        );
+        assert_eq!(
+            manager_node_exe_path(dir, "v22.19.0", ManagerKind::Nvm, true),
+            dir.join("v22.19.0").join("node.exe")
+        );
+    }
+
     /// resolve_manager_node(工单 #20):按管理器布局定位 node exe,验证版本匹配才命中;
     /// 版本不符 / 缺失 → None(幂等复用判定的反例)。
     #[cfg(unix)]
