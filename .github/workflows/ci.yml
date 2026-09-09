@@ -11,7 +11,7 @@ env:
 jobs:
   test:
     name: 测试与静态检查
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-set # 弹性 pod(arc-public runner group,已允许 public 仓库)
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
