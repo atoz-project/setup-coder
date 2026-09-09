@@ -17,6 +17,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      # ARC 弹性 pod 是极简 runner 镜像,无 C 工具链(cc 链接器缺失会让 cargo 直接失败);
+      # 仓库惯例与 build 矩阵的 musl-tools 步骤一致,冷 pod 每次 ~30s。长期应沉进 runner 镜像
+      - name: 安装 C 工具链(ARC pod 极简镜像)
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
 
