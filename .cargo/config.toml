@@ -1,0 +1,7 @@
+# 测试进程内多个用例经 ScopedHome 改写进程级 HOME(edition 2024 把 set_var 列为
+# unsafe 正是因为这个):写侧互斥锁管不住并发读侧——libtest 默认多线程并行,任一
+# Command::spawn 都会隐式复制 environ,与 set_var 撕裂后 spawn 偶发失败
+# (version_output_of 返回 None → 幂等复用检查漏检 → 走进未桩化的下载分支,
+# 本地 30 次全量复现 12 次红)。进程级环境变量的测试套件只能串行;套件 <2s,无感。
+[env]
+RUST_TEST_THREADS = "1"
