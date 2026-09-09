@@ -20,9 +20,8 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH
 
 # 钉小版本:CI 的 clippy 门禁对工具链版本敏感,升级 = 改这里 + 重建镜像,可审计。
-# rustup profile minimal 不含 clippy/rustfmt,显式带上(clippy 是 CI 门禁)。
-# 顺带预装 musl target(配合上面 musl-tools)。
 RUN curl -sSf https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init -o /tmp/rustup-init \
+ && chmod +x /tmp/rustup-init \
  && /tmp/rustup-init -y --no-modify-path --profile minimal \
       --default-toolchain 1.98.1 --component clippy rustfmt \
  && rustup target add x86_64-unknown-linux-musl \
