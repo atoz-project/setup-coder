@@ -11,7 +11,7 @@ env:
 jobs:
   test:
     name: 测试与静态检查
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-set # 默认走弹性 pod;冷 pod 无 cargo 缓存,开销与 GH-hosted 现状(同样无缓存)相当
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
