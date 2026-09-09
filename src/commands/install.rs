@@ -502,13 +502,21 @@ mod tests {
     /// 不依赖也不改动用户 ~/.npmrc;复用裸 Node 时同样成立(用 #19 复用路径接线验证)
     #[test]
     fn npm_env_scoped_to_prefix_for_reused_node() {
+        // 不依赖宿主 PATH 有 node(ARC 弹性 pod 等极简环境没有):造最小假 Node
+        // 发行版布局(bin/node + lib/node_modules/npm/bin/npm-cli.js)——npm_command
+        // 只派生路径并探 npm-cli.js 存在性,从不执行 node
+        let root =
+            std::env::temp_dir().join(format!("setup-coder-test-npmenv-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let node_exe = root.join("bin/node");
+        let npm_cli = root.join("lib/node_modules/npm/bin/npm-cli.js");
+        fs::create_dir_all(node_exe.parent().unwrap()).unwrap();
+        fs::create_dir_all(npm_cli.parent().unwrap()).unwrap();
+        fs::write(&node_exe, "").unwrap();
+        fs::write(&npm_cli, "").unwrap();
         let prefix = Prefix::new(PathBuf::from("/x/.setup-coder"));
         let node = node_source::for_plan(&NodePlan::ReuseBareNode {
-            // 本机(开发机)必有 node(构建依赖);绝对路径布局 = Node 发行版
-            path: std::env::current_exe()
-                .ok()
-                .and_then(|_| which_node())
-                .expect("开发机 PATH 上应有 node"),
+            path: node_exe,
             version: semver::Version::new(22, 19, 0),
         })
         .unwrap();
@@ -538,6 +546,7 @@ mod tests {
             .and_then(|v| v.as_ref())
             .expect("npm 子进程必须带 PATH");
         assert_eq!(std::env::split_paths(path).next().unwrap(), node.bin_dir());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     /// 决策接线:达标裸 Node → 复用,落账 user_bare + 版本 + exe 绝对路径;
