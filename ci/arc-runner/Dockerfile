@@ -23,7 +23,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 RUN curl -sSf https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init -o /tmp/rustup-init \
  && chmod +x /tmp/rustup-init \
  && /tmp/rustup-init -y --no-modify-path --profile minimal \
-      --default-toolchain 1.98.1 --component clippy rustfmt \
+      --default-toolchain 1.98.1 --component clippy --component rustfmt \
  && rustup target add x86_64-unknown-linux-musl \
  && rm /tmp/rustup-init \
  && chmod -R a+w /usr/local/rustup /usr/local/cargo \
