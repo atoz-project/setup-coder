@@ -119,7 +119,7 @@ fn decide_node_with(
             })?;
             // 落账(state v2):复用来源 = user_bare + 解析出的版本 + exe 绝对路径
             state.node = Some(NodeState {
-                source: NodeSourceKind::UserBare,
+                source: NodeSourceKind::Bare,
                 version: node.version().to_string(),
                 exe: Some(node.exe().to_path_buf()),
             });
@@ -171,7 +171,7 @@ fn use_nvm(
         version: floor.clone(),
     })?;
     state.node = Some(NodeState {
-        source: NodeSourceKind::UserNvm,
+        source: NodeSourceKind::Nvm,
         version: node.version().to_string(),
         exe: Some(node.exe().to_path_buf()),
     });
@@ -205,7 +205,7 @@ fn use_fnm(
         version: floor.clone(),
     })?;
     state.node = Some(NodeState {
-        source: NodeSourceKind::UserFnm,
+        source: NodeSourceKind::Fnm,
         version: node.version().to_string(),
         exe: Some(node.exe().to_path_buf()),
     });
@@ -267,7 +267,7 @@ fn install_fnm_branch(
         version: floor.clone(),
     })?;
     state.node = Some(NodeState {
-        source: NodeSourceKind::UserFnm,
+        source: NodeSourceKind::Fnm,
         version: node.version().to_string(),
         exe: Some(node.exe().to_path_buf()),
     });
@@ -560,9 +560,9 @@ mod tests {
         let mut state = State::default();
         let node = decide_node_with(&tools, &bare(floor.clone()), &mut state).unwrap();
         assert_eq!(node.exe(), node_path);
-        assert_eq!(node.kind(), NodeSourceKind::UserBare);
+        assert_eq!(node.kind(), NodeSourceKind::Bare);
         let recorded = state.node.expect("复用应落账 Node 记录");
-        assert_eq!(recorded.source, NodeSourceKind::UserBare);
+        assert_eq!(recorded.source, NodeSourceKind::Bare);
         assert_eq!(recorded.exe.as_deref(), Some(node_path.as_path()));
         assert!(!recorded.version.is_empty(), "落账版本应为解析出的实际版本");
         // 不落前缀:复用路径只记 user_bare 落账,前缀不存在任何 node 布局路径
@@ -606,10 +606,10 @@ mod tests {
         // 合并 #21 后选定 exe 经 from_exe canonicalize(macOS /var→/private/var 归一)
         let expected_exe = std::fs::canonicalize(&stub_exe).unwrap_or_else(|_| stub_exe.clone());
         assert_eq!(node.exe(), expected_exe.as_path());
-        assert_eq!(node.kind(), NodeSourceKind::UserNvm);
+        assert_eq!(node.kind(), NodeSourceKind::Nvm);
         assert_eq!(node.version(), format!("v{floor}"), "选定版本即工具集下限");
         let recorded = state.node.clone().expect("应落账 user_nvm");
-        assert_eq!(recorded.source, NodeSourceKind::UserNvm);
+        assert_eq!(recorded.source, NodeSourceKind::Nvm);
         assert_eq!(recorded.exe.as_deref(), Some(expected_exe.as_path()));
         assert_eq!(recorded.version, format!("v{floor}"));
 
@@ -655,10 +655,10 @@ mod tests {
         // 合并 #21 后选定 exe 经 from_exe canonicalize(macOS /var→/private/var 归一)
         let expected_exe = std::fs::canonicalize(&stub_exe).unwrap_or_else(|_| stub_exe.clone());
         assert_eq!(node.exe(), expected_exe.as_path());
-        assert_eq!(node.kind(), NodeSourceKind::UserFnm);
+        assert_eq!(node.kind(), NodeSourceKind::Fnm);
         assert_eq!(node.version(), format!("v{floor}"));
         let recorded = state.node.clone().expect("应落账 user_fnm");
-        assert_eq!(recorded.source, NodeSourceKind::UserFnm);
+        assert_eq!(recorded.source, NodeSourceKind::Fnm);
         assert_eq!(recorded.exe.as_deref(), Some(expected_exe.as_path()));
 
         // 幂等:二次调用仍复用同一路径
@@ -720,11 +720,11 @@ mod tests {
         let stub_node = fnm_dir.join(format!("node-versions/v{floor}/installation/bin/node"));
         let expected_exe = std::fs::canonicalize(&stub_node).unwrap_or_else(|_| stub_node.clone());
         assert_eq!(node.exe(), expected_exe.as_path());
-        assert_eq!(node.kind(), NodeSourceKind::UserFnm);
+        assert_eq!(node.kind(), NodeSourceKind::Fnm);
         assert_eq!(node.version(), format!("v{floor}"));
         // 落账:user_fnm + 版本 + exe;Node 不落前缀(前缀根在隔离 HOME 下不存在 node/)
         let recorded = state.node.clone().expect("应落账 user_fnm");
-        assert_eq!(recorded.source, NodeSourceKind::UserFnm);
+        assert_eq!(recorded.source, NodeSourceKind::Fnm);
         assert_eq!(recorded.exe.as_deref(), Some(expected_exe.as_path()));
         assert!(!root.join(".setup-coder/node").exists());
 

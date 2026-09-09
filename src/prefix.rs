@@ -117,17 +117,19 @@ pub struct State {
     pub path_injections: Vec<PathInjection>,
 }
 
-/// Node 来源(v2 三值,serde snake_case):不存在 prefix 值——Node 永不落前缀
+/// Node 来源(v2 三值,清单线格式 user_bare/user_nvm/user_fnm):不存在 prefix 值——Node 永不落前缀
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum NodeSourceKind {
     /// 用户机器上 PATH 里的裸 Node(不属任何版本管理器),复用
-    UserBare,
+    #[serde(rename = "user_bare")]
+    Bare,
     /// 经用户已有的 nvm 安装/复用的 Node
-    UserNvm,
+    #[serde(rename = "user_nvm")]
+    Nvm,
     /// 经 fnm 安装/复用的 Node(含 setup-coder 代装 fnm 的情形;
     /// 机器上最多一个 fnm,是否代装由 fnm 钩子的 rc 注入记录区分)
-    UserFnm,
+    #[serde(rename = "user_fnm")]
+    Fnm,
 }
 
 /// Node 安装记录:来源 + 解析出的版本;管理器来源另记 node exe 绝对路径
@@ -254,7 +256,7 @@ mod tests {
         fs::create_dir_all(p.root()).unwrap();
         let mut s = State {
             node: Some(NodeState {
-                source: NodeSourceKind::UserBare,
+                source: NodeSourceKind::Bare,
                 version: "v24.19.0".into(),
                 exe: None,
             }),
@@ -291,19 +293,19 @@ mod tests {
         // 三种来源各自序列化为 snake_case 标签并完整往返
         let cases = [
             (
-                NodeSourceKind::UserBare,
+                NodeSourceKind::Bare,
                 "\"user_bare\"",
                 NodeState {
-                    source: NodeSourceKind::UserBare,
+                    source: NodeSourceKind::Bare,
                     version: "v24.19.0".into(),
                     exe: None,
                 },
             ),
             (
-                NodeSourceKind::UserNvm,
+                NodeSourceKind::Nvm,
                 "\"user_nvm\"",
                 NodeState {
-                    source: NodeSourceKind::UserNvm,
+                    source: NodeSourceKind::Nvm,
                     version: "v22.19.0".into(),
                     exe: Some(PathBuf::from(
                         "/home/u/.nvm/versions/node/v22.19.0/bin/node",
@@ -311,10 +313,10 @@ mod tests {
                 },
             ),
             (
-                NodeSourceKind::UserFnm,
+                NodeSourceKind::Fnm,
                 "\"user_fnm\"",
                 NodeState {
-                    source: NodeSourceKind::UserFnm,
+                    source: NodeSourceKind::Fnm,
                     version: "v22.19.0".into(),
                     exe: Some(PathBuf::from(
                         "/home/u/.local/share/fnm/node-versions/v22.19.0/installation/bin/node",

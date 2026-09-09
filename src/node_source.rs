@@ -122,24 +122,24 @@ pub fn for_plan(plan: &NodePlan) -> Result<NodeSource, String> {
     Ok(match plan {
         NodePlan::ReuseBareNode { path, .. } => {
             let version = platform::version_output_of(path).unwrap_or_else(|| "unknown".into());
-            NodeSource::from_exe(path.clone(), version, NodeSourceKind::UserBare)
+            NodeSource::from_exe(path.clone(), version, NodeSourceKind::Bare)
         }
         NodePlan::UseNvm { path, version } => managed_node(
             resolve_installed(path, version, platform::ManagerKind::Nvm)?,
             version,
-            NodeSourceKind::UserNvm,
+            NodeSourceKind::Nvm,
         ),
         NodePlan::UseFnm { path, version } => managed_node(
             resolve_installed(path, version, platform::ManagerKind::Fnm)?,
             version,
-            NodeSourceKind::UserFnm,
+            NodeSourceKind::Fnm,
         ),
         // InstallFnm(工单 #22):执行层已把 fnm 装到平台默认数据目录并装好下限版本,
         // 经同一份管理器布局推导解析(落账来源同为 user_fnm)
         NodePlan::InstallFnm { version } => managed_node(
             resolve_installed(&fnm_default_home()?, version, platform::ManagerKind::Fnm)?,
             version,
-            NodeSourceKind::UserFnm,
+            NodeSourceKind::Fnm,
         ),
     })
 }
@@ -192,7 +192,7 @@ mod tests {
         // canonicalize 失败则原样保留。无论哪条,后续派生都自洽。
         let expected_exe = NodeSource::resolved_exe(Path::new("/usr/local/bin/node"));
         assert_eq!(node.exe(), expected_exe);
-        assert_eq!(node.kind(), NodeSourceKind::UserBare);
+        assert_eq!(node.kind(), NodeSourceKind::Bare);
         assert_eq!(node.bin_dir(), expected_exe.parent().unwrap());
         assert_eq!(
             node.npm_cli(),
@@ -265,7 +265,7 @@ mod tests {
             let source = NodeSource {
                 exe: PathBuf::from(exe),
                 version: "v22.19.0".into(),
-                kind: NodeSourceKind::UserBare,
+                kind: NodeSourceKind::Bare,
             };
             assert_eq!(source.npm_cli(), Path::new(expected_npm_cli), "exe={exe}");
         }
@@ -327,7 +327,7 @@ mod tests {
         .unwrap();
         assert_eq!(nvm.exe(), NodeSource::resolved_exe(&nvm_exe));
         assert_eq!(nvm.version(), "v22.19.0");
-        assert_eq!(nvm.kind(), NodeSourceKind::UserNvm);
+        assert_eq!(nvm.kind(), NodeSourceKind::Nvm);
 
         let fnm = for_plan(&NodePlan::UseFnm {
             path: fnm_dir.clone(),
@@ -336,7 +336,7 @@ mod tests {
         .unwrap();
         assert_eq!(fnm.exe(), NodeSource::resolved_exe(&fnm_exe));
         assert_eq!(fnm.version(), "v22.19.0");
-        assert_eq!(fnm.kind(), NodeSourceKind::UserFnm);
+        assert_eq!(fnm.kind(), NodeSourceKind::Fnm);
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -369,7 +369,7 @@ mod tests {
         let expected_exe = NodeSource::resolved_exe(&stub_exe);
         assert_eq!(node.exe(), expected_exe);
         assert_eq!(node.version(), format!("v{version}"));
-        assert_eq!(node.kind(), NodeSourceKind::UserFnm);
+        assert_eq!(node.kind(), NodeSourceKind::Fnm);
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -380,17 +380,17 @@ mod tests {
         assert_eq!(from_state(&state), None);
         // 有记录(user-bare + exe)→ 按落账解析
         state.node = Some(crate::prefix::NodeState {
-            source: NodeSourceKind::UserBare,
+            source: NodeSourceKind::Bare,
             version: "v24.19.0".into(),
             exe: Some(PathBuf::from("/opt/node/bin/node")),
         });
         let node = from_state(&state).expect("有落账记录应解析出 Node");
         assert_eq!(node.exe(), Path::new("/opt/node/bin/node"));
         assert_eq!(node.version(), "v24.19.0");
-        assert_eq!(node.kind(), NodeSourceKind::UserBare);
+        assert_eq!(node.kind(), NodeSourceKind::Bare);
         // 记录缺 exe 路径(管理器来源缺落账)→ 同样 None
         state.node = Some(crate::prefix::NodeState {
-            source: NodeSourceKind::UserFnm,
+            source: NodeSourceKind::Fnm,
             version: "v24.19.0".into(),
             exe: None,
         });

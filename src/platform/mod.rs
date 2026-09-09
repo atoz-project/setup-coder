@@ -734,7 +734,6 @@ pub fn detect_node_facts() -> crate::node_plan::NodeFacts {
 
 /// 下载并安装 fnm 到 `dest_dir`,返回 fnm 可执行文件路径(分派 imp)。
 /// 经 net::fnm_urls 镜像容错链下载;幂等:目标已装且可用则直接复用。
-
 pub fn install_fnm(cache_dir: &Path, dest_dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
     imp::install_fnm(cache_dir, dest_dir)
 }
@@ -874,8 +873,7 @@ fn parse_semver_like(raw: &str) -> Option<semver::Version> {
     // `fnm --version` 输出 "fnm 1.39.0":取最后一个含数字的 token,容忍工具名前缀
     let token = s
         .split_whitespace()
-        .filter(|t| t.chars().any(|c| c.is_ascii_digit()))
-        .last()?;
+        .rfind(|t| t.chars().any(|c| c.is_ascii_digit()))?;
     let mut it = token.split('.');
     let major: u64 = it.next()?.parse().ok()?;
     let minor: u64 = it.next().unwrap_or("0").parse().ok()?;

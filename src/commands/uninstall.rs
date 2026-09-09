@@ -115,13 +115,13 @@ fn preserved_summary(state: &State) -> Option<String> {
     let node = state.node.as_ref()?;
     let location = node_location(node);
     Some(match node.source {
-        NodeSourceKind::UserBare => {
+        NodeSourceKind::Bare => {
             format!("你机器上原有的 Node({},{location})将被保留", node.version)
         }
-        NodeSourceKind::UserNvm => {
+        NodeSourceKind::Nvm => {
             format!("你的 nvm 与其 Node({},{location})将被保留", node.version)
         }
-        NodeSourceKind::UserFnm => {
+        NodeSourceKind::Fnm => {
             format!("fnm 及其 Node({},{location})将被保留", node.version)
         }
     })
@@ -159,13 +159,13 @@ fn preserved_hint(state: &State) -> Option<String> {
     };
     let location = node_location(node);
     Some(match node.source {
-        NodeSourceKind::UserBare => {
+        NodeSourceKind::Bare => {
             format!("你机器上原有的 Node({},{location})未受影响。", node.version)
         }
-        NodeSourceKind::UserNvm => format!(
+        NodeSourceKind::Nvm => format!(
             "你的 nvm 与其 Node({location})未受影响;如需移除 Node 请自行 `nvm uninstall <版本>`。"
         ),
-        NodeSourceKind::UserFnm => {
+        NodeSourceKind::Fnm => {
             if has_fnm_hook(state) {
                 let fnm_dir = crate::node_source::fnm_default_home()
                     .map(|d| d.display().to_string())
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn preserved_hint_user_bare() {
-        let s = state_with(NodeSourceKind::UserBare, None, Vec::new());
+        let s = state_with(NodeSourceKind::Bare, None, Vec::new());
         let hint = preserved_hint(&s).unwrap();
         assert!(hint.contains("未受影响"), "bare: {hint}");
         assert!(hint.contains("v24.19.0"), "bare 带版本: {hint}");
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn preserved_hint_user_nvm() {
         let s = state_with(
-            NodeSourceKind::UserNvm,
+            NodeSourceKind::Nvm,
             Some("/home/u/.nvm/versions/node/v24.19.0/bin/node"),
             Vec::new(),
         );
@@ -294,7 +294,7 @@ mod tests {
     fn preserved_hint_user_fnm_setup_coder_installed() {
         // 清单里有 FnmHook 记录 → fnm 由 setup-coder 代装
         let s = state_with(
-            NodeSourceKind::UserFnm,
+            NodeSourceKind::Fnm,
             Some("/home/u/.local/share/fnm/node-versions/v24.19.0/installation/bin/node"),
             vec![PathInjection::FnmHook {
                 file: PathBuf::from("/home/u/.zshrc"),
@@ -313,7 +313,7 @@ mod tests {
     fn preserved_hint_user_fnm_user_owned() {
         // 清单里无 FnmHook 记录 → fnm 是用户自己的,提示保持原样、给 fnm uninstall
         let s = state_with(
-            NodeSourceKind::UserFnm,
+            NodeSourceKind::Fnm,
             Some("/home/u/.local/share/fnm/node-versions/v24.19.0/installation/bin/node"),
             Vec::new(),
         );
@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn has_fnm_hook_detection() {
         let with = state_with(
-            NodeSourceKind::UserFnm,
+            NodeSourceKind::Fnm,
             Some("/x"),
             vec![PathInjection::FnmHook {
                 file: PathBuf::from("/home/u/.zshrc"),
@@ -337,7 +337,7 @@ mod tests {
         assert!(has_fnm_hook(&with));
         // ShellRc 注入不算 fnm 钩子
         let without = state_with(
-            NodeSourceKind::UserFnm,
+            NodeSourceKind::Fnm,
             Some("/x"),
             vec![PathInjection::ShellRc {
                 file: PathBuf::from("/home/u/.zshrc"),
@@ -407,11 +407,11 @@ mod tests {
 
     #[test]
     fn preserved_summary_names_source_and_version() {
-        let bare = state_with(NodeSourceKind::UserBare, None, Vec::new());
+        let bare = state_with(NodeSourceKind::Bare, None, Vec::new());
         let s = preserved_summary(&bare).unwrap();
         assert!(s.contains("Node"), "summary: {s}");
         assert!(s.contains("v24.19.0"), "summary 带版本: {s}");
-        let fnm = state_with(NodeSourceKind::UserFnm, Some("/fnm/x"), Vec::new());
+        let fnm = state_with(NodeSourceKind::Fnm, Some("/fnm/x"), Vec::new());
         assert!(preserved_summary(&fnm).unwrap().contains("fnm"));
     }
 }

@@ -61,9 +61,9 @@ fn doctor() -> i32 {
     // 清单无 Node 记录/缺 exe(尚未完成安装)→ 体检直接报缺,不存在前缀保底 Node
     let node = node_source::from_state(&state.clone().unwrap_or_default());
     let source_label = node.as_ref().map(|n| match n.kind() {
-        crate::prefix::NodeSourceKind::UserBare => "复用用户裸 Node",
-        crate::prefix::NodeSourceKind::UserNvm => "经 nvm",
-        crate::prefix::NodeSourceKind::UserFnm => "经 fnm",
+        crate::prefix::NodeSourceKind::Bare => "复用用户裸 Node",
+        crate::prefix::NodeSourceKind::Nvm => "经 nvm",
+        crate::prefix::NodeSourceKind::Fnm => "经 fnm",
     });
     check(
         &mut failures,
