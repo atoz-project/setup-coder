@@ -583,7 +583,6 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("setup-coder-test-usenvm-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let prefix = Prefix::new(root.join(".setup-coder"));
         let tools: Vec<&Tool> = registry::all().iter().collect();
         let floor = registry::floor_for_tools(&tools);
         // 桩:nvm 目录下已装达标版本(幂等复用分支)
@@ -632,7 +631,6 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("setup-coder-test-fnm-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let prefix = Prefix::new(root.join(".setup-coder"));
         let tools: Vec<&Tool> = registry::all().iter().collect();
         let floor = registry::floor_for_tools(&tools);
         // 桩:fnm 数据目录下已装达标版本(幂等复用分支,不触发 fnm install)

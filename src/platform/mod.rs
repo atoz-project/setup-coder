@@ -980,13 +980,13 @@ pub fn fnm_asset_suffix_for(os: &str, arch: &str) -> Result<&'static str, String
 }
 
 /// fnm 的 PowerShell profile 钩子行(Windows;写入用户 profile,幂等判断以这行为准)。
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub fn fnm_hook_line_powershell() -> String {
     "fnm env --use-on-cd | Out-String | Invoke-Expression  # setup-coder fnm".to_string()
 }
 
 /// PowerShell profile 内容中是否已有 fnm 钩子(任一 fnm env 初始化行;trim 比较)。
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub fn fnm_hook_present_powershell(profile_content: &str) -> bool {
     profile_content
         .lines()
@@ -995,8 +995,8 @@ pub fn fnm_hook_present_powershell(profile_content: &str) -> bool {
 }
 
 /// Windows 侧 `fnm list` 解析:与 unix 同一规则(默认标记优先,否则最后非 system 版本)。
-/// 单列出来仅为平台对称与单测;逻辑与 parse_fnm_list 相同。
-#[cfg(any(windows, test))]
+/// 单列出来仅为平台对称;逻辑与 parse_fnm_list 相同。
+#[cfg(windows)]
 pub fn parse_fnm_list_windows(out: &str) -> Option<semver::Version> {
     parse_fnm_list(out)
 }
