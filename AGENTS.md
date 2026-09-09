@@ -9,6 +9,11 @@
 
 需要 git worktree 时,建在 `.agents/worktree/<任务名>/` 下。该路径已 gitignore。
 
+## 提交习惯
+
+改动完成且验证通过后,主动 `git commit` + `git push`(当前分支直推 origin),不等用户提醒。
+提交信息沿用仓库惯例:中文 conventional commits(如 `fix(install): …`),一个逻辑改动一个 commit。
+
 ## Agent skills
 
 ### Issue tracker
