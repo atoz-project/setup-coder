@@ -5,7 +5,7 @@
 ## Language
 
 **Tool(工具)**:
-一个 AI 编程 CLI(v1:codex、claude code、pi、omp)。分发形态两种:npm 包(codex / claude code / pi,经 npmmirror)与预编译二进制资产(omp,经 GitHub Releases 容错链——其 npm 包硬依赖 Bun 运行时,见 ADR-0005)。
+一个 AI 编程 CLI(v1:codex、claude code、pi、omp、prime-agent)。分发形态三种:npm 包(codex / claude code / pi,经 npmmirror)、npm 格式 tarball URL(prime-agent,不在任何 registry,经 gh-proxy 链,见 ADR-0006)与预编译二进制资产(omp,其 npm 包硬依赖 Bun 运行时,见 ADR-0005)。
 _Avoid_: 软件、应用、agent
 
 **Registry(注册表)**:

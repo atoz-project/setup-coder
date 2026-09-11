@@ -90,6 +90,21 @@ pub fn omp_urls(asset: &str) -> Vec<String> {
     vec![format!("https://gh-proxy.com/{github}"), github]
 }
 
+/// prime-agent 版本与 tag。升级 = 改这两行并重测。
+/// 核实来源:GitHub PrimeIntellect-ai/prime-agent releases/latest,2026-09-11 时为 v0.9.4。
+pub const PRIME_AGENT_VERSION: &str = "0.9.4";
+pub const PRIME_AGENT_TAG: &str = "v0.9.4";
+
+/// prime-agent npm tarball 下载 URL 容错链(gh-proxy 加速 + GitHub Release 直连兜底)。
+/// 注意:tarball 内部 3 个兄弟依赖硬编码 r2.dev URL,由 npm 在安装时直连拉取,
+/// 本链只管主 tarball(可达性证据与风险见 ADR-0006)。
+pub fn prime_agent_urls() -> Vec<String> {
+    let github = format!(
+        "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/{PRIME_AGENT_TAG}/prime-agent-{PRIME_AGENT_VERSION}.tgz"
+    );
+    vec![format!("https://gh-proxy.com/{github}"), github]
+}
+
 /// 建 HTTP agent:尊重代理环境变量;超时由调用方定(大文件下载给足,体检探测要短)
 fn agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
@@ -261,6 +276,25 @@ mod tests {
             assert!(u.ends_with("omp-linux-x64"), "URL 应含文件名:{u}");
         }
         // npmmirror/华为云均不镜像 oh-my-pi 二进制(实测 NOT_FOUND),主源为 gh-proxy
+        assert!(urls[0].contains("gh-proxy.com"), "主源应为 gh-proxy");
+        assert!(
+            urls.last().unwrap().starts_with("https://github.com/"),
+            "兜底应为 GitHub 直连"
+        );
+    }
+
+    #[test]
+    fn prime_agent_urls_form_a_mirror_chain() {
+        let urls = prime_agent_urls();
+        assert!(urls.len() >= 2, "必须有容错链");
+        for u in &urls {
+            assert!(u.starts_with("https://"), "只允许 https:{u}");
+            assert!(u.contains(PRIME_AGENT_TAG), "URL 应含 tag:{u}");
+            assert!(
+                u.ends_with(&format!("prime-agent-{PRIME_AGENT_VERSION}.tgz")),
+                "URL 应含文件名:{u}"
+            );
+        }
         assert!(urls[0].contains("gh-proxy.com"), "主源应为 gh-proxy");
         assert!(
             urls.last().unwrap().starts_with("https://github.com/"),

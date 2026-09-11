@@ -102,8 +102,8 @@ fn doctor() -> i32 {
     for tool in registry::all() {
         // npm 工具入口是 shim(Windows 为 .cmd);二进制工具是本体(Windows 为 .exe)
         let entry = match tool.source {
-            registry::ToolSource::Npm { .. } => platform::shim_file_name(tool.bin),
             registry::ToolSource::Binary => platform::exe_name(tool.bin),
+            _ => platform::shim_file_name(tool.bin),
         };
         let shim = prefix.bin_dir().join(entry);
         if let Some(v) = platform::version_output_of(&shim) {

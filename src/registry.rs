@@ -4,7 +4,7 @@ use std::cmp::max;
 
 use semver::Version;
 
-/// Tool 的分发来源(CONTEXT.md:Tool 的两种形态)
+/// Tool 的分发来源(CONTEXT.md:Tool 的三种形态)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolSource {
     /// npm 包(经 npmmirror 安装);运行时需要 Node >= node_floor
@@ -15,6 +15,14 @@ pub enum ToolSource {
         /// 数据源:docs/research/node-version-requirements.md(npm `latest` 元数据,2026-09-05 核实)。
         /// 语义为纯下限,不带上限/范围,故用最小 `Version` 表示而不用 `VersionReq`;
         /// 跨工具比较只做偏序上的 max,`VersionReq` 无此操作。
+        node_floor: Version,
+    },
+    /// npm 格式的 tarball URL(包不在任何 registry;下载容错链在 net.rs)。
+    /// 与 Npm 共享 Node 前置、npm 安装、shim 与冒烟路径,仅 install 参数是 URL。
+    NpmTarball {
+        /// 包的真实 name 字段(安装落点/shim 识别用,非 registry 查询名)
+        package: &'static str,
+        /// engines.node 下限,取自 tarball 内 package.json(实测日期见各 Tool 注释)
         node_floor: Version,
     },
     /// 预编译二进制资产(GitHub Releases,下载容错链在 net.rs);零运行时依赖
@@ -33,10 +41,12 @@ pub struct Tool {
 }
 
 impl Tool {
-    /// npm 包名;二进制来源返回 None
+    /// npm 包名(registry 名或 tarball 内真实名);二进制来源返回 None
     pub fn package(&self) -> Option<&'static str> {
         match &self.source {
-            ToolSource::Npm { package, .. } => Some(package),
+            ToolSource::Npm { package, .. } | ToolSource::NpmTarball { package, .. } => {
+                Some(package)
+            }
             ToolSource::Binary => None,
         }
     }
@@ -44,13 +54,15 @@ impl Tool {
     /// Node 版本下限;二进制来源无 Node 依赖,返回 0.0.0(不限制)
     pub fn node_floor(&self) -> Version {
         match &self.source {
-            ToolSource::Npm { node_floor, .. } => node_floor.clone(),
+            ToolSource::Npm { node_floor, .. } | ToolSource::NpmTarball { node_floor, .. } => {
+                node_floor.clone()
+            }
             ToolSource::Binary => Version::new(0, 0, 0),
         }
     }
 }
 
-/// v1 四个 Tool
+/// v1 五个 Tool
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: "codex",
@@ -83,7 +95,21 @@ pub const TOOLS: &[Tool] = &[
         bin: "omp",
         source: ToolSource::Binary,
     },
+    // prime-agent:不在任何 registry,GitHub release 发 npm 格式 tarball(ADR-0006);
+    // engines.node >=22.8.0 取自 tarball 内 package.json(2026-09-11 实测 v0.9.4)
+    Tool {
+        name: "prime-agent",
+        bin: "prime-agent",
+        source: ToolSource::NpmTarball {
+            package: "prime-agent",
+            node_floor: Version::new(22, 8, 0),
+        },
+    },
 ];
+
+// 注:prime-agent 走 NpmTarball(ADR-0006)——不在任何 npm registry,GitHub release 发
+// npm 格式 tarball;其 3 个兄弟依赖硬编码 r2.dev URL,由 npm 直连(国内可达性证据
+// 见 ADR-0006:DNS 无污染、大陆 ICMP 可达;SNI 级未实测,失败时给中文提示)。
 
 /// 全部 Tool(`install` 不带参数 = 装全部)
 pub fn all() -> &'static [Tool] {
@@ -111,8 +137,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v1_has_exactly_four_tools() {
-        assert_eq!(TOOLS.len(), 4);
+    fn v1_has_exactly_five_tools() {
+        assert_eq!(TOOLS.len(), 5);
     }
 
     #[test]
@@ -144,6 +170,10 @@ mod tests {
         assert_eq!(omp.source, ToolSource::Binary);
         assert_eq!(omp.package(), None);
         assert_eq!(omp.node_floor(), Version::new(0, 0, 0));
+        // prime-agent:tarball 来源,包名用于安装落点,Node 下限 22.8.0
+        let pa = find("prime-agent").unwrap();
+        assert_eq!(pa.package(), Some("prime-agent"));
+        assert_eq!(pa.node_floor(), Version::new(22, 8, 0));
     }
 
     #[test]
@@ -161,6 +191,8 @@ mod tests {
             Version::new(22, 0, 0)
         );
         assert_eq!(find("pi").unwrap().node_floor(), Version::new(22, 19, 0));
+        // prime-agent 不在 npm registry,下限取自 tarball 内 package.json(2026-09-11 实测)
+        assert_eq!(find("prime-agent").unwrap().node_floor(), Version::new(22, 8, 0));
     }
 
     #[test]

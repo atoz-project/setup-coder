@@ -428,17 +428,18 @@ pub fn path_activation_hint() -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// 运行 `<exe> --version`,成功且输出非空则返回去空白后的版本串;否则 None。
+/// 版本串以 stdout 为准;stdout 空则取 stderr(prime-agent 的 --version 打在 stderr,v0.9.4 实测)。
 pub fn version_output_of(exe: &Path) -> Option<String> {
     let out = Command::new(exe).arg("--version").output().ok()?;
     if !out.status.success() {
         return None;
     }
-    let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if version.is_empty() {
-        None
-    } else {
-        Some(version)
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return Some(stdout);
     }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if stderr.is_empty() { None } else { Some(stderr) }
 }
 
 /// 进程 PATH 环境变量是否包含指定目录(逐条比较;components 归一化尾部斜杠)。
@@ -1464,6 +1465,11 @@ mod tests {
             fs::write(&bad, "#!/bin/sh\nexit 1\n").unwrap();
             fs::set_permissions(&bad, fs::Permissions::from_mode(0o755)).unwrap();
             assert!(version_output_of(&bad).is_none());
+            // 版本打在 stderr(prime-agent v0.9.4 实测)→ 同样认
+            let err_out = dir.join("errout");
+            fs::write(&err_out, "#!/bin/sh\necho '4.5.6' >&2\n").unwrap();
+            fs::set_permissions(&err_out, fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(version_output_of(&err_out).unwrap(), "4.5.6");
             fs::remove_dir_all(&dir).unwrap();
         }
     }

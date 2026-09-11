@@ -58,7 +58,7 @@ fn install(tool: Option<&str>) -> Result<(), Box<dyn Error>> {
     let mut installed = Vec::new();
     for t in tools {
         match &t.source {
-            registry::ToolSource::Npm { .. } => {
+            registry::ToolSource::Npm { .. } | registry::ToolSource::NpmTarball { .. } => {
                 let node = node.as_ref().expect("有 npm 工具必已选定 Node");
                 install_tool(&prefix, node, t, &mut installed)?;
             }
@@ -361,18 +361,41 @@ fn npm_command(
     Ok(cmd)
 }
 
-/// 装一个 npm Tool:npm install -g → 生成 shim → 冒烟 --version → 返回清单记录
+/// 装一个 npm 系 Tool(Npm 装 registry 包名;NpmTarball 装 URL,容错链见 net.rs)
+/// → 生成 shim → 冒烟 --version → 返回清单记录
 fn install_tool(
     prefix: &Prefix,
     node: &NodeSource,
     tool: &Tool,
     installed: &mut Vec<ToolState>,
 ) -> Result<(), Box<dyn Error>> {
-    let package = tool.package().expect("install_tool 只服务 npm Tool");
-    println!("安装 {}({})…", tool.name, package);
-    let status = npm_command(prefix, node, &["install", "--global", package])?.status()?;
-    if !status.success() {
-        return Err(format!("npm 安装 {} 失败(退出码 {:?})", package, status.code()).into());
+    let package = tool.package().expect("install_tool 只服务 npm 系 Tool");
+    let candidates: Vec<String> = match &tool.source {
+        registry::ToolSource::Npm { .. } => vec![package.to_string()],
+        registry::ToolSource::NpmTarball { .. } => net::prime_agent_urls(),
+        registry::ToolSource::Binary => unreachable!("二进制 Tool 走 install_binary_tool"),
+    };
+    let mut failures = Vec::new();
+    let mut installed_ok = false;
+    for target in &candidates {
+        println!("安装 {}({})…", tool.name, target);
+        let status = npm_command(prefix, node, &["install", "--global", target])?.status()?;
+        if status.success() {
+            installed_ok = true;
+            break;
+        }
+        failures.push(format!("  {target}:退出码 {:?}", status.code()));
+    }
+    if !installed_ok {
+        let mut msg = format!("npm 安装 {} 失败,已尝试:\n{}", tool.name, failures.join("\n"));
+        if matches!(tool.source, registry::ToolSource::NpmTarball { .. }) {
+            msg.push_str(
+                "\n提示:prime-agent 的部分依赖托管在 Cloudflare R2(r2.dev,安装时由 npm 直连)。\
+                 若上方错误涉及 r2.dev 超时/重置,是当前网络到 R2 不可达:稍后重试,\
+                 或配置 HTTPS_PROXY 后重跑(ADR-0006)。",
+            );
+        }
+        return Err(msg.into());
     }
 
     // 去劫持契约(工单 #21):shim 以选定 Node 的绝对路径 exec Tool 入口,
@@ -392,7 +415,12 @@ fn install_tool(
 
     installed.push(ToolState {
         name: tool.name.to_string(),
-        package: package.to_string(),
+        package: match &tool.source {
+            registry::ToolSource::NpmTarball { .. } => {
+                format!("tarball:{package}@{}", net::PRIME_AGENT_VERSION)
+            }
+            _ => package.to_string(),
+        },
         version,
     });
     Ok(())
@@ -431,7 +459,8 @@ fn install_binary_tool(
     Ok(())
 }
 
-/// 跑 `<shim> --version`,返回版本输出
+/// 跑 `<shim> --version`,返回版本输出。版本串以 stdout 为准;stdout 空则取 stderr
+/// (prime-agent 的 --version 打在 stderr,实测 v0.9.4)
 fn smoke_version(shim: &Path) -> Result<String, Box<dyn Error>> {
     let out = Command::new(shim).arg("--version").output()?;
     if !out.status.success() {
@@ -442,11 +471,15 @@ fn smoke_version(shim: &Path) -> Result<String, Box<dyn Error>> {
         )
         .into());
     }
-    let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if version.is_empty() {
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return Ok(stdout);
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if stderr.is_empty() {
         return Err("--version 无输出".into());
     }
-    Ok(version)
+    Ok(stderr)
 }
 
 fn print_summary(prefix: &Prefix, installed: &[ToolState]) {
@@ -467,6 +500,19 @@ fn print_summary(prefix: &Prefix, installed: &[ToolState]) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[cfg(unix)]
+    #[test]
+    fn smoke_version_accepts_stderr_only_version() {
+        // prime-agent 的 --version 打在 stderr(v0.9.4 实测)——回归守护
+        let dir = std::env::temp_dir().join(format!("smoke-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let sh = dir.join("t.sh");
+        fs::write(&sh, "#!/bin/sh\necho 1.2.3 >&2\n").unwrap();
+        platform::make_executable(&sh).unwrap();
+        assert_eq!(smoke_version(&sh).unwrap(), "1.2.3");
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn resolve_tools_defaults_to_full_registry() {
