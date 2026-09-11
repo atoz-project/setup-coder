@@ -28,8 +28,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows:x86_64 + 静态 CRT(+crt-static)
-          - { name: win-x64, os: windows-latest, target: x86_64-pc-windows-msvc, bin: setup-coder.exe }
+          # Windows:x86_64,迁 ARC 用 x86_64-pc-windows-gnu 交叉编译(ADR-0004;镜像 arc-runner-rust 自带 mingw 链接器与 gnu target)
+          - { name: win-x64, os: arc-runner-set-rust, target: x86_64-pc-windows-gnu, bin: setup-coder.exe }
           # macOS arm64 / x86_64:均在 Apple Silicon runner 上构建(x86_64 走交叉编译,纯 Rust 无 C 依赖)
           - { name: mac-arm64, os: macos-latest, target: aarch64-apple-darwin, bin: setup-coder }
           - { name: mac-x64, os: macos-latest, target: x86_64-apple-darwin, bin: setup-coder }
@@ -38,7 +38,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # win-x64 在 ARC pod 上:镜像已钉 Rust 工具链并预装 gnu target,免 action 重复安装
       - uses: dtolnay/rust-toolchain@stable
+        if: matrix.name != 'win-x64'
         with:
           targets: ${{ matrix.target }}
 
@@ -46,14 +48,7 @@ jobs:
         if: matrix.name == 'linux-x64'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: 编译(Windows 静态 CRT)
-        if: matrix.name == 'win-x64'
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --release --locked --target ${{ matrix.target }}
-
       - name: 编译
-        if: matrix.name != 'win-x64'
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: 收集产物
