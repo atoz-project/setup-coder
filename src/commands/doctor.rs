@@ -65,15 +65,29 @@ fn doctor() -> i32 {
         crate::prefix::NodeSourceKind::Nvm => "经 nvm",
         crate::prefix::NodeSourceKind::Fnm => "经 fnm",
     });
-    check(
-        &mut failures,
-        "Node.js",
-        node.and_then(|n| {
-            platform::version_output_of(n.exe())
-                .map(|v| format!("{v}({},{})", source_label.unwrap_or(""), n.exe().display()))
-        }),
-        "重跑 setup-coder install 安装/修复 Node.js",
-    );
+    let node_report = node.and_then(|n| {
+        platform::version_output_of(n.exe())
+            .map(|v| format!("{v}({},{})", source_label.unwrap_or(""), n.exe().display()))
+    });
+    // 已装 Tool 全是二进制来源时 Node 不是 Prerequisite,缺失降为信息项而非待处理
+    let node_needed = state
+        .as_ref()
+        .map(|s| {
+            s.tools
+                .iter()
+                .any(|t| registry::find(&t.name).and_then(|t| t.package()).is_some())
+        })
+        .unwrap_or(true);
+    if node_report.is_none() && !node_needed {
+        println!("− Node.js:未安装(已装 Tool 均为二进制资产,不需要 Node)");
+    } else {
+        check(
+            &mut failures,
+            "Node.js",
+            node_report,
+            "重跑 setup-coder install 安装/修复 Node.js",
+        );
+    }
 
     check(
         &mut failures,
@@ -86,7 +100,12 @@ fn doctor() -> i32 {
     // 装过(清单有记录)但冒烟未通过 = ✗ 计失败;从未安装 = 信息项,不算待处理
     // (否则只装部分 Tool 的用户永远无法全过,见工单 #4 自审)。
     for tool in registry::all() {
-        let shim = prefix.bin_dir().join(platform::shim_file_name(tool.bin));
+        // npm 工具入口是 shim(Windows 为 .cmd);二进制工具是本体(Windows 为 .exe)
+        let entry = match tool.source {
+            registry::ToolSource::Npm { .. } => platform::shim_file_name(tool.bin),
+            registry::ToolSource::Binary => platform::exe_name(tool.bin),
+        };
+        let shim = prefix.bin_dir().join(entry);
         if let Some(v) = platform::version_output_of(&shim) {
             println!("✓ Tool {}:{v}", tool.name);
         } else if state

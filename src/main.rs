@@ -98,7 +98,7 @@ struct CommonArgs {
 /// install 子命令参数
 #[derive(clap::Args)]
 struct InstallArgs {
-    /// 只装指定 Tool(codex / claude-code / pi);不带 = 装全部
+    /// 只装指定 Tool(codex / claude-code / pi / omp);不带 = 装全部
     tool: Option<String>,
     #[command(flatten)]
     common: CommonArgs,

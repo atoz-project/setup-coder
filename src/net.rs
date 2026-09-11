@@ -74,6 +74,22 @@ pub fn fnm_urls(asset: &str) -> Vec<String> {
     ]
 }
 
+/// omp(Oh My Pi)版本与 tag。升级 = 改这两行并重测。
+/// 核实来源:GitHub can1357/oh-my-pi releases/latest,2026-09-11 时为 v18.1.17。
+pub const OMP_VERSION: &str = "18.1.17";
+pub const OMP_TAG: &str = "v18.1.17";
+
+/// omp 预编译二进制下载 URL 容错链(gh-proxy 加速 + GitHub Release 直连兜底)。
+///
+/// npmmirror 不镜像 oh-my-pi 二进制(`/-/binary/oh-my-pi/` 实测 NOT_FOUND,2026-09-11),
+/// 华为云同理无此项目,故与 fnm 链同形。资产为单文件免运行时二进制
+/// (bun build --compile 产物,文件名如 omp-linux-x64,由 platform::omp_asset_name 定)。
+pub fn omp_urls(asset: &str) -> Vec<String> {
+    let github =
+        format!("https://github.com/can1357/oh-my-pi/releases/download/{OMP_TAG}/{asset}");
+    vec![format!("https://gh-proxy.com/{github}"), github]
+}
+
 /// 建 HTTP agent:尊重代理环境变量;超时由调用方定(大文件下载给足,体检探测要短)
 fn agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
@@ -124,13 +140,11 @@ pub fn download_first(urls: &[String], dest: &Path) -> Result<String, Box<dyn Er
     let mut failures = Vec::new();
     for url in urls {
         match download_once(&agent, url, dest) {
-            Ok(()) if looks_like_archive(dest) => return Ok(url.clone()),
+            Ok(()) if looks_like_payload(dest) => return Ok(url.clone()),
             Ok(()) => {
-                // HTTP 200 但内容不是 zip/tar.gz(华为云对缺失资产返回 200 + HTML 错误页)
+                // HTTP 200 但内容不是合法产物(华为云对缺失资产返回 200 + HTML 错误页)
                 let _ = fs::remove_file(dest);
-                failures.push(format!(
-                    "  {url}:HTTP 200 但内容不是 zip/tar.gz(镜像错误页)"
-                ));
+                failures.push(format!("  {url}:HTTP 200 但内容不是可识别产物(镜像错误页)"));
             }
             Err(e) => {
                 let _ = fs::remove_file(dest); // 不留下半截文件
@@ -141,18 +155,26 @@ pub fn download_first(urls: &[String], dest: &Path) -> Result<String, Box<dyn Er
     Err(format!("所有 Mirror 均下载失败:\n{}", failures.join("\n")).into())
 }
 
-/// 产物魔数嗅探:本仓库下载的产物只有 zip(`PK\x03\x04`,fnm/MinGit)与
-/// tar.gz(`\x1f\x8b`,无——Node tarball 已随工单 #22 移除)。华为云等镜像会对
-/// 不存在的资产返回 HTTP 200 + HTML 错误页(实测 fnm-macos.zip),仅靠状态码无法
-/// 识别,导致解压才炸;下载后以首字节魔数快速判定,不符合即当作该源失败,
-/// 容错链继续换下一镜像。
-fn looks_like_archive(dest: &Path) -> bool {
+/// 产物魔数嗅探:本仓库下载的产物为 zip(`PK\x03\x04`,fnm/MinGit)、预编译可执行文件
+/// (ELF `\x7fELF` = omp linux;`MZ` = omp windows;Mach-O = omp macOS)之一。
+/// 华为云等镜像会对不存在的资产返回 HTTP 200 + HTML 错误页(实测 fnm-macos.zip),
+/// 仅靠状态码无法识别,导致解压/执行才炸;下载后以首字节魔数快速判定,不符合即
+/// 当作该源失败,容错链继续换下一镜像。
+fn looks_like_payload(dest: &Path) -> bool {
     use std::io::Read;
     let mut head = [0u8; 4];
     let n = fs::File::open(dest)
         .and_then(|mut f| f.read(&mut head))
         .unwrap_or(0);
-    n >= 2 && (head.starts_with(b"PK\x03\x04") || head[0] == 0x1f && head[1] == 0x8b)
+    if n < 2 {
+        return false;
+    }
+    head.starts_with(b"PK\x03\x04")            // zip
+        || head.starts_with(b"\x7fELF")        // ELF(linux)
+        || head.starts_with(b"MZ")             // PE(windows)
+        || head.starts_with(b"\xcf\xfa\xed\xfe") // Mach-O 64 LE(macOS)
+        || head.starts_with(b"\xfe\xed\xfa\xcf") // Mach-O 64 BE
+        || head.starts_with(b"\xca\xfe\xba\xbe") // Mach-O fat/universal
 }
 
 #[cfg(test)]
@@ -227,6 +249,41 @@ mod tests {
             urls.last().unwrap().contains("github.com"),
             "兜底应为 GitHub 直连"
         );
+    }
+
+    #[test]
+    fn omp_urls_form_a_mirror_chain() {
+        let urls = omp_urls("omp-linux-x64");
+        assert!(urls.len() >= 2, "必须有容错链");
+        for u in &urls {
+            assert!(u.starts_with("https://"), "只允许 https:{u}");
+            assert!(u.contains(OMP_TAG), "URL 应含 tag:{u}");
+            assert!(u.ends_with("omp-linux-x64"), "URL 应含文件名:{u}");
+        }
+        // npmmirror/华为云均不镜像 oh-my-pi 二进制(实测 NOT_FOUND),主源为 gh-proxy
+        assert!(urls[0].contains("gh-proxy.com"), "主源应为 gh-proxy");
+        assert!(
+            urls.last().unwrap().starts_with("https://github.com/"),
+            "兜底应为 GitHub 直连"
+        );
+    }
+
+    #[test]
+    fn payload_magic_recognizes_zip_and_executables() {
+        let dir = std::env::temp_dir().join(format!("setup-coder-magic-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let check = |bytes: &[u8]| {
+            let p = dir.join("p");
+            fs::write(&p, bytes).unwrap();
+            looks_like_payload(&p)
+        };
+        assert!(check(b"PK\x03\x04aaaa"), "zip");
+        assert!(check(b"\x7fELF\x02\x01"), "ELF(omp linux)");
+        assert!(check(b"MZ\x90\x00\x03"), "PE(omp windows)");
+        assert!(check(b"\xcf\xfa\xed\xfe\x07"), "Mach-O(omp macOS)");
+        assert!(!check(b"<html>404</html>"), "镜像错误页应判负");
+        assert!(!check(b""), "空文件应判负");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

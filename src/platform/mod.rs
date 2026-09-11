@@ -979,6 +979,37 @@ pub fn fnm_asset_suffix_for(os: &str, arch: &str) -> Result<&'static str, String
     }
 }
 
+/// omp 发行资产名:单文件免运行时二进制(bun build --compile 产物)。
+/// 实测 can1357/oh-my-pi v18.1.17 资产清单;用户机为 glibc Ubuntu/macOS/Windows,
+/// linux 选 glibc 变体(musl 变体存在但 v1 无 Alpine 场景)。
+pub fn omp_asset_name_for(os: &str, arch: &str) -> Result<&'static str, String> {
+    match (os, arch) {
+        ("windows", "x86_64") => Ok("omp-windows-x64.exe"),
+        ("macos", "aarch64") => Ok("omp-darwin-arm64"),
+        ("macos", "x86_64") => Ok("omp-darwin-x64"),
+        ("linux", "x86_64") => Ok("omp-linux-x64"),
+        ("linux", "aarch64") => Ok("omp-linux-arm64"),
+        _ => Err(format!("暂不支持的平台组合(omp):{os}/{arch}")),
+    }
+}
+
+/// 当前平台的 omp 发行资产名
+pub fn omp_asset_name() -> Result<&'static str, String> {
+    omp_asset_name_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// 给下载落盘的二进制加可执行位(unix chmod 755;Windows 无此概念,no-op)
+pub fn make_executable(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    }
+    #[cfg(windows)]
+    let _ = path;
+    Ok(())
+}
+
 /// fnm 的 PowerShell profile 钩子行(Windows;写入用户 profile,幂等判断以这行为准)。
 #[cfg(windows)]
 pub fn fnm_hook_line_powershell() -> String {

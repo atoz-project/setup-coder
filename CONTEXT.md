@@ -5,11 +5,11 @@
 ## Language
 
 **Tool(工具)**:
-一个以 npm 包分发的 AI 编程 CLI(v1:codex、claude code、pi)。
+一个 AI 编程 CLI(v1:codex、claude code、pi、omp)。分发形态两种:npm 包(codex / claude code / pi,经 npmmirror)与预编译二进制资产(omp,经 GitHub Releases 容错链——其 npm 包硬依赖 Bun 运行时,见 ADR-0005)。
 _Avoid_: 软件、应用、agent
 
 **Registry(注册表)**:
-代码内的静态表,一行描述一个 Tool:名称 → npm 包名 → 校验命令。加新工具 = 加一行。
+代码内的静态表,一行描述一个 Tool:名称 → 分发来源(npm 包名 / 二进制资产)→ 校验命令。加新工具 = 加一行。
 _Avoid_: 插件系统、配置中心
 
 **Prerequisite(前置依赖)**:

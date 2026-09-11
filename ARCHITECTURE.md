@@ -11,7 +11,7 @@
 ├── Cargo.toml              # 单 crate(bin),依赖最少化(ADR-0001)
 ├── src/
 │   ├── main.rs             # 入口:clap 解析,分发子命令
-│   ├── registry.rs         # Tool 静态注册表:名称 → npm 包名 → 校验命令 → Node 下限(加工具 = 加一行)
+│   ├── registry.rs         # Tool 静态注册表:名称 → 分发来源(npm 包 / 二进制资产)→ 校验命令 → Node 下限(加工具 = 加一行)
 │   ├── node_plan.rs        # Node 来源决策层(纯函数,零 IO):facts → NodePlan(工单 #16)
 │   ├── node_source.rs      # Node 来源解析接缝:NodePlan/清单 → 选定 Node 的 exe 绝对路径(shim 契约出处,工单 #15/#21)
 │   ├── prefix.rs           # 私有前缀布局的唯一真源(路径常量都从这里出)
@@ -57,6 +57,7 @@ net.rs 与 one-liner 脚本共用原则:多源依次尝试,首个成功者落盘
 - one-liner 下载 setup-coder 自身(`scripts/install.sh|ps1` 头部常量):OSS → Gitee → GitHub 加速前缀 → GitHub 直连;镜像根留空 = 跳过该源。
 - MinGit(`net.rs`,仅 Windows):npmmirror → cdn.npmmirror → 华为云。
 - fnm(`net.rs`):华为云 → gh-proxy → GitHub 直连(npmmirror 不镜像 fnm,实测 404)。
+- omp 二进制(`net.rs`):gh-proxy → GitHub 直连(npmmirror/华为云均不镜像 oh-my-pi,实测 NOT_FOUND 2026-09-11)。
 
 ## 安装前缀布局(用户机器)
 

@@ -1,11 +1,12 @@
 //! `install` 子命令:选定 Node(决策)→ 装 Tool 进 Private Prefix,零输入完成。
 //!
-//! 流水线:建前缀骨架 → 探测 Node 事实 → 纯决策 → 按方案执行
+//! 流水线:建前缀骨架 → (有 npm 工具时)探测 Node 事实 → 纯决策 → 按方案执行
 //! (达标裸 Node 复用 #19;经已有 nvm/fnm 装下限版本 #20;无 Node 无管理器则新装 fnm
 //! 兜底 #22)→ 确保 git(Prerequisite,工单 #3)→ 复制 setup-coder 本体 → npm 装 Tool
 //! (注册表)→ 生成 shim(JS 入口以绝对路径经选定 Node 解释,原生入口直接 exec;
-//! 无 PATH 前置,工单 #21)→ 冒烟
-//! (`--version`,Installed 定义)→ 注入 PATH → 写 state.json。重跑 = 修复/升级,幂等。
+//! 无 PATH 前置,工单 #21);二进制 Tool(omp)免 Node/git/npm,容错链下载资产直接落
+//! bin/ → 冒烟(`--version`,Installed 定义)→ 注入 PATH → 写 state.json。
+//! 重跑 = 修复/升级,幂等。
 
 use std::error::Error;
 use std::ffi::OsString;
@@ -13,6 +14,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use crate::net;
 use crate::node_plan::{self, NodeFacts, NodePlan};
 use crate::node_source::{self, NodeSource};
 use crate::platform;
@@ -40,15 +42,28 @@ fn install(tool: Option<&str>) -> Result<(), Box<dyn Error>> {
     println!("安装进 Private Prefix:{}", prefix.root().display());
     prefix.create_skeleton()?;
 
-    // 决策点解析出选定 Node:达标裸 Node 复用、经已有 nvm/fnm、或新装 fnm 兜底;
-    // 全部指向用户机器上的绝对路径,Node 不落前缀(ADR-0003,无前缀 node/ 目录)
-    let node = decide_node(&tools, &mut state)?;
-    ensure_git(&prefix)?;
+    // 纯二进制选择零运行时:Node 决策、git、npmrc 都是 npm 工具的 Prerequisite,跳过
+    let needs_npm = tools.iter().any(|t| t.package().is_some());
+    let node = if needs_npm {
+        // 决策点解析出选定 Node:达标裸 Node 复用、经已有 nvm/fnm、或新装 fnm 兜底;
+        // 全部指向用户机器上的绝对路径,Node 不落前缀(ADR-0003,无前缀 node/ 目录)
+        let node = decide_node(&tools, &mut state)?;
+        ensure_git(&prefix)?;
+        write_npmrc(&prefix)?;
+        Some(node)
+    } else {
+        None
+    };
     install_setup_coder_self(&prefix)?;
-    write_npmrc(&prefix)?;
     let mut installed = Vec::new();
     for t in tools {
-        install_tool(&prefix, &node, t, &mut installed)?;
+        match &t.source {
+            registry::ToolSource::Npm { .. } => {
+                let node = node.as_ref().expect("有 npm 工具必已选定 Node");
+                install_tool(&prefix, node, t, &mut installed)?;
+            }
+            registry::ToolSource::Binary => install_binary_tool(&prefix, t, &mut installed)?,
+        }
     }
     // upsert:单装一个 Tool 不得抹掉其他 Tool 的清单记录(幂等 = 修复/升级)
     upsert_tools(&mut state.tools, &installed);
@@ -346,22 +361,23 @@ fn npm_command(
     Ok(cmd)
 }
 
-/// 装一个 Tool:npm install -g → 生成 shim → 冒烟 --version → 返回清单记录
+/// 装一个 npm Tool:npm install -g → 生成 shim → 冒烟 --version → 返回清单记录
 fn install_tool(
     prefix: &Prefix,
     node: &NodeSource,
     tool: &Tool,
     installed: &mut Vec<ToolState>,
 ) -> Result<(), Box<dyn Error>> {
-    println!("安装 {}({})…", tool.name, tool.package);
-    let status = npm_command(prefix, node, &["install", "--global", tool.package])?.status()?;
+    let package = tool.package().expect("install_tool 只服务 npm Tool");
+    println!("安装 {}({})…", tool.name, package);
+    let status = npm_command(prefix, node, &["install", "--global", package])?.status()?;
     if !status.success() {
-        return Err(format!("npm 安装 {} 失败(退出码 {:?})", tool.package, status.code()).into());
+        return Err(format!("npm 安装 {} 失败(退出码 {:?})", package, status.code()).into());
     }
 
     // 去劫持契约(工单 #21):shim 以选定 Node 的绝对路径 exec Tool 入口,
     // 不再把 node bin 目录前置进 PATH;重跑覆写旧形态 shim。
-    let launcher = platform::tool_launcher(&prefix.npm_bin_dir(), tool.package, tool.bin)?;
+    let launcher = platform::tool_launcher(&prefix.npm_bin_dir(), package, tool.bin)?;
     let shim = platform::write_shim(&prefix.bin_dir(), node.exe(), &launcher, tool.bin)?;
 
     // 冒烟:Installed = 能启动并报出版本号(CONTEXT.md)
@@ -376,7 +392,40 @@ fn install_tool(
 
     installed.push(ToolState {
         name: tool.name.to_string(),
-        package: tool.package.to_string(),
+        package: package.to_string(),
+        version,
+    });
+    Ok(())
+}
+
+/// 装一个二进制 Tool:容错链下载预编译资产 → 直接落 bin/(本体即入口,免 shim 免运行时)
+/// → 冒烟 --version → 返回清单记录。v1 唯一二进制 Tool 是 omp,资产名/URL 链直连
+/// platform::omp_asset_name / net::omp_urls;出现第二个二进制 Tool 时再抽象。
+fn install_binary_tool(
+    prefix: &Prefix,
+    tool: &Tool,
+    installed: &mut Vec<ToolState>,
+) -> Result<(), Box<dyn Error>> {
+    println!("安装 {}(预编译二进制 v{})…", tool.name, net::OMP_VERSION);
+    let asset = platform::omp_asset_name()?;
+    let dest = prefix.bin_dir().join(platform::exe_name(tool.bin));
+    let hit = net::download_first(&net::omp_urls(asset), &dest)?;
+    println!("下载自:{hit}");
+    platform::make_executable(&dest)?;
+
+    // 冒烟:Installed = 能启动并报出版本号(CONTEXT.md)
+    let version = smoke_version(&dest).map_err(|e| {
+        format!(
+            "{} 安装后冒烟失败(`{} --version` 未通过):{e}",
+            tool.name,
+            dest.display()
+        )
+    })?;
+    println!("{} 安装完成:{version}", tool.name);
+
+    installed.push(ToolState {
+        name: tool.name.to_string(),
+        package: format!("binary:can1357/oh-my-pi@{}", net::OMP_VERSION),
         version,
     });
     Ok(())
@@ -428,8 +477,8 @@ mod tests {
     #[test]
     fn resolve_tools_by_name_and_bin() {
         assert_eq!(
-            resolve_tools(Some("codex")).unwrap()[0].package,
-            "@openai/codex"
+            resolve_tools(Some("codex")).unwrap()[0].package(),
+            Some("@openai/codex")
         );
         assert_eq!(
             resolve_tools(Some("claude")).unwrap()[0].name,
