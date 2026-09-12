@@ -2053,6 +2053,50 @@ mod tests {
         assert!(fnm_asset_suffix_for("freebsd", "x86_64").is_err());
     }
 
+    #[test]
+    fn omp_asset_name_covers_ci_targets() {
+        assert_eq!(
+            omp_asset_name_for("windows", "x86_64").unwrap(),
+            "omp-windows-x64.exe"
+        );
+        assert_eq!(
+            omp_asset_name_for("macos", "aarch64").unwrap(),
+            "omp-darwin-arm64"
+        );
+        assert_eq!(
+            omp_asset_name_for("macos", "x86_64").unwrap(),
+            "omp-darwin-x64"
+        );
+        assert_eq!(
+            omp_asset_name_for("linux", "x86_64").unwrap(),
+            "omp-linux-x64"
+        );
+        assert_eq!(
+            omp_asset_name_for("linux", "aarch64").unwrap(),
+            "omp-linux-arm64"
+        );
+        assert!(omp_asset_name_for("linux", "riscv64").is_err());
+        assert!(omp_asset_name_for("windows", "aarch64").is_err());
+    }
+
+    /// unix 下落盘二进制必须带 755,否则「安装成功但执行 permission denied」
+    #[cfg(unix)]
+    #[test]
+    fn make_executable_sets_755() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("setup-coder-test-mkexec-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("bin");
+        fs::write(&f, "x").unwrap();
+        make_executable(&f).unwrap();
+        assert_eq!(
+            fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn fnm_default_dir_is_under_home() {
