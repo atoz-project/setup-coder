@@ -70,14 +70,7 @@ fn doctor() -> i32 {
             .map(|v| format!("{v}({},{})", source_label.unwrap_or(""), n.exe().display()))
     });
     // 已装 Tool 全是二进制来源时 Node 不是 Prerequisite,缺失降为信息项而非待处理
-    let node_needed = state
-        .as_ref()
-        .map(|s| {
-            s.tools
-                .iter()
-                .any(|t| registry::find(&t.name).and_then(|t| t.package()).is_some())
-        })
-        .unwrap_or(true);
+    let node_needed = state.as_ref().map(state_needs_node).unwrap_or(true);
     if node_report.is_none() && !node_needed {
         println!("− Node.js:未安装(已装 Tool 均为二进制资产,不需要 Node)");
     } else {
@@ -191,6 +184,14 @@ fn doctor() -> i32 {
     }
 }
 
+/// 已装 Tool 集合是否需要 Node:任一 npm 来源(包或 tarball)即需要;
+/// 纯二进制来源(omp)不需要。注册表外的名字(老清单残留)按不需要计。
+fn state_needs_node(s: &State) -> bool {
+    s.tools
+        .iter()
+        .any(|t| registry::find(&t.name).and_then(|t| t.package()).is_some())
+}
+
 /// 一项体检:`report` 为 Some(版本串) 则 ✓,None 则 ✗ + 下一步指引
 fn check(failures: &mut u32, label: &str, report: Option<String>, hint: &str) {
     match report {
@@ -200,5 +201,37 @@ fn check(failures: &mut u32, label: &str, report: Option<String>, hint: &str) {
             println!("  → 下一步:{hint}");
             *failures += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prefix::ToolState;
+
+    fn state_with_tools(names: &[&str]) -> State {
+        State {
+            tools: names
+                .iter()
+                .map(|n| ToolState {
+                    name: n.to_string(),
+                    package: String::new(),
+                    version: "1.0.0".to_string(),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn state_needs_node_only_for_npm_sourced_tools() {
+        // 空清单、纯二进制(omp):Node 缺失降为信息项
+        assert!(!state_needs_node(&state_with_tools(&[])));
+        assert!(!state_needs_node(&state_with_tools(&["omp"])));
+        // 任一 npm 来源(包或 tarball)即需要 Node
+        assert!(state_needs_node(&state_with_tools(&["omp", "codex"])));
+        assert!(state_needs_node(&state_with_tools(&["prime-agent"])));
+        // 注册表外的名字(老清单里已下架的 Tool)不拖住 Node 判定
+        assert!(!state_needs_node(&state_with_tools(&["gone-tool"])));
     }
 }
