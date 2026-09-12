@@ -386,7 +386,7 @@ mod tests {
         std::fs::create_dir_all(prefix.root()).unwrap();
 
         // 部分清单:fnm 已代装、钩子已注入 rc、Node 未落账(F1 失败形态)
-        let hook_line = platform::fnm_hook_line();
+        let hook_line = platform::fnm_hook_line(std::path::Path::new("/x/fnm/fnm"));
         let rc = root.join(".zshrc");
         std::fs::write(&rc, format!("# user rc\n{hook_line}\n")).unwrap();
         let mut state = State::default();
@@ -399,7 +399,7 @@ mod tests {
         uninstall(true).unwrap();
 
         let after = std::fs::read_to_string(&rc).unwrap();
-        assert!(!after.contains("fnm env"), "钩子行应被精确回滚:{after}");
+        assert!(!after.contains("env --use-on-cd"), "钩子行应被精确回滚:{after}");
         assert!(after.contains("# user rc"), "用户原内容保留:{after}");
         assert!(!prefix.root().exists(), "前缀已删");
         let _ = std::fs::remove_dir_all(&root);

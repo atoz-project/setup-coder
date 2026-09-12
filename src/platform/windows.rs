@@ -390,8 +390,9 @@ fn run_fnm_windows(fnm_exe: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> 
 }
 
 /// 注入 fnm 钩子到 PowerShell profile(幂等)。返回实际改动的 FnmHook 记录。
-pub fn inject_fnm_hook() -> io::Result<Vec<PathInjection>> {
-    let line = super::fnm_hook_line_powershell();
+/// v0.2.0–v0.3.0 的旧钩子行(假定 fnm 在 PATH)随重跑逐字替换为绝对路径新行。
+pub fn inject_fnm_hook(fnm_exe: &Path) -> io::Result<Vec<PathInjection>> {
+    let line = super::fnm_hook_line_powershell(fnm_exe);
     let mut injections = Vec::new();
     for profile in powershell_profiles() {
         let existing = match fs::read_to_string(&profile) {
@@ -399,11 +400,27 @@ pub fn inject_fnm_hook() -> io::Result<Vec<PathInjection>> {
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e),
         };
-        if let Some(new) = super::shell_rc_append(&existing, &line) {
+        let mut content = existing;
+        let mut dirty = false;
+        if let Some(stripped) =
+            super::shell_rc_remove(&content, super::LEGACY_FNM_HOOK_LINE_POWERSHELL)
+        {
+            content = stripped;
+            dirty = true;
+        }
+        let mut appended = false;
+        if let Some(new) = super::shell_rc_append(&content, &line) {
+            content = new;
+            dirty = true;
+            appended = true;
+        }
+        if dirty {
             if let Some(parent) = profile.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(&profile, new)?;
+            fs::write(&profile, &content)?;
+        }
+        if appended {
             injections.push(PathInjection::FnmHook {
                 file: profile,
                 line: line.clone(),

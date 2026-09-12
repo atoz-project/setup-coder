@@ -50,7 +50,7 @@ $ProfilePaths = @(
   (Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1')
 )
 # fnm_hook_line_powershell() 逐字:
-$FnmHookLine = 'fnm env --use-on-cd | Out-String | Invoke-Expression  # setup-coder fnm'
+$FnmHookLine = '& "' + (Join-Path $FnmDir 'fnm.exe') + '" env --use-on-cd | Out-String | Invoke-Expression  # setup-coder fnm'   # fnm_hook_line_powershell(fnm_exe),绝对路径不依赖 PATH
 $NvmDirDefault = Join-Path $env:APPDATA 'nvm'               # nvm-windows 默认(NVM_DIR 优先)
 
 $script:Pass = 0; $script:Fail = 0

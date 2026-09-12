@@ -805,8 +805,8 @@ pub enum ManagerKind {
 /// 把 fnm 的 shell 钩子幂等注入用户 shell 配置文件(unix:各登录 rc;Windows:PowerShell
 /// profile)。重跑不产生重复行。返回实际改动的 FnmHook 注入记录(供 state.json 精确
 /// 回滚——代装 fnm 与 PATH 行分两类记录,uninstall 按记录逐字回滚)。
-pub fn inject_fnm_hook() -> io::Result<Vec<PathInjection>> {
-    imp::inject_fnm_hook()
+pub fn inject_fnm_hook(fnm_exe: &Path) -> io::Result<Vec<PathInjection>> {
+    imp::inject_fnm_hook(fnm_exe)
 }
 
 /// fnm 可执行文件绝对路径:探测事实里的 path 可能是 fnm 数据目录(含 exe 自身),
@@ -951,20 +951,32 @@ pub fn fnm_default_dir_impl(home: &Path) -> PathBuf {
 }
 
 /// fnm 的 unix shell rc 钩子行(写入登录 rc,幂等判断以这行为准)。
+/// fnm 本体不进 PATH(rc 里唯一的 PATH 注入是 bin/),钩子按绝对路径调 fnm——
+/// 与 run_fnm 同一「不依赖 PATH」契约(homebrew `eval "$(/opt/homebrew/bin/brew
+/// shellenv)"` 同款);否则新开终端 fnm 不在 PATH,钩子报错且 node 不出现。
 /// `--use-on-cd` 是官方安装脚本默认注入的常用旗标。
 #[cfg(any(unix, test))]
-pub fn fnm_hook_line() -> String {
-    "eval \"$(fnm env --use-on-cd)\"  # setup-coder fnm".to_string()
+pub fn fnm_hook_line(fnm_exe: &Path) -> String {
+    format!(
+        "eval \"$(\"{}\" env --use-on-cd)\"  # setup-coder fnm",
+        fnm_exe.display()
+    )
 }
+
+/// v0.2.0–v0.3.0 注入的旧钩子行(假定 fnm 在 PATH,实测新开终端必报
+/// "Command 'fnm' not found")。重跑 install 时原位替换为绝对路径新行。
+#[cfg(any(unix, test))]
+pub const LEGACY_FNM_HOOK_LINE: &str = "eval \"$(fnm env --use-on-cd)\"  # setup-coder fnm";
 
 /// rc 内容中是否已有 fnm 钩子(任一 fnm env 初始化行;trim 比较)。
 /// 与 fnm_hook_line 注入、以及「已装但未 source」探测共用同一判定。
+/// 绝对路径形态下 `fnm" env` 中间隔引号,不能再匹配 "fnm env" 子串。
 #[cfg(any(unix, test))]
 pub fn fnm_hook_present(rc_content: &str) -> bool {
     rc_content
         .lines()
         .map(str::trim)
-        .any(|l| l.starts_with("eval") && l.contains("fnm env"))
+        .any(|l| l.starts_with("eval") && l.contains("fnm") && l.contains("env"))
 }
 
 /// fnm 发行资产后缀:`fnm-<suffix>.zip`。
@@ -1012,18 +1024,29 @@ pub fn make_executable(path: &Path) -> io::Result<()> {
 }
 
 /// fnm 的 PowerShell profile 钩子行(Windows;写入用户 profile,幂等判断以这行为准)。
+/// 与 unix 同理按绝对路径调 fnm(fnm.exe 在 %APPDATA%\fnm,不在 PATH);
+/// `&` 是 PowerShell 的调用操作符,带引号路径必须用它。
 #[cfg(windows)]
-pub fn fnm_hook_line_powershell() -> String {
-    "fnm env --use-on-cd | Out-String | Invoke-Expression  # setup-coder fnm".to_string()
+pub fn fnm_hook_line_powershell(fnm_exe: &Path) -> String {
+    format!(
+        "& \"{}\" env --use-on-cd | Out-String | Invoke-Expression  # setup-coder fnm",
+        fnm_exe.display()
+    )
 }
 
+/// v0.2.0–v0.3.0 注入的旧 PowerShell 钩子行(假定 fnm 在 PATH);重跑 install 时替换。
+#[cfg(windows)]
+pub const LEGACY_FNM_HOOK_LINE_POWERSHELL: &str =
+    "fnm env --use-on-cd | Out-String | Invoke-Expression  # setup-coder fnm";
+
 /// PowerShell profile 内容中是否已有 fnm 钩子(任一 fnm env 初始化行;trim 比较)。
+/// 绝对路径形态下不能再匹配 "fnm env" 子串(`fnm.exe" env` 中间隔引号)。
 #[cfg(windows)]
 pub fn fnm_hook_present_powershell(profile_content: &str) -> bool {
     profile_content
         .lines()
         .map(str::trim)
-        .any(|l| l.contains("fnm env") && l.contains("Invoke-Expression"))
+        .any(|l| l.contains("fnm") && l.contains("env") && l.contains("Invoke-Expression"))
 }
 
 /// Windows 侧 `fnm list` 解析:与 unix 同一规则(默认标记优先,否则最后非 system 版本)。
@@ -1120,11 +1143,12 @@ fn current_fnm_node_version(fnm_exe: &Path) -> Option<semver::Version> {
 #[cfg(unix)]
 pub(super) fn inject_fnm_hook_via_shell_rc(
     rc_file_names: &[&str],
+    fnm_exe: &Path,
 ) -> io::Result<Vec<PathInjection>> {
     let home = std::env::home_dir().ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "无法确定用户家目录(HOME 未设置)")
     })?;
-    let line = fnm_hook_line();
+    let line = fnm_hook_line(fnm_exe);
     let mut injections = Vec::new();
     for name in rc_file_names {
         let file = home.join(name);
@@ -1133,8 +1157,24 @@ pub(super) fn inject_fnm_hook_via_shell_rc(
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e),
         };
-        if let Some(new) = shell_rc_append(&existing, &line) {
-            fs::write(&file, new)?;
+        // 修复/升级:v0.2.0–v0.3.0 的旧钩子行(假定 fnm 在 PATH)逐字替换为
+        // 绝对路径新行;旧行的 state 记录留着无妨——回滚按记录逐字删,删不到即跳过
+        let mut content = existing;
+        let mut dirty = false;
+        if let Some(stripped) = shell_rc_remove(&content, LEGACY_FNM_HOOK_LINE) {
+            content = stripped;
+            dirty = true;
+        }
+        let mut appended = false;
+        if let Some(new) = shell_rc_append(&content, &line) {
+            content = new;
+            dirty = true;
+            appended = true;
+        }
+        if dirty {
+            fs::write(&file, &content)?;
+        }
+        if appended {
             injections.push(PathInjection::FnmHook {
                 file,
                 line: line.clone(),
@@ -2012,15 +2052,19 @@ mod tests {
 
     #[test]
     fn fnm_hook_line_is_unix_eval_form() {
-        let line = fnm_hook_line();
+        let line = fnm_hook_line(Path::new("/home/u/.local/share/fnm/fnm"));
+        assert_eq!(
+            line,
+            "eval \"$(\"/home/u/.local/share/fnm/fnm\" env --use-on-cd)\"  # setup-coder fnm"
+        );
         assert!(line.starts_with("eval"), "应为 eval 钩子:{line}");
-        assert!(line.contains("fnm env"), "应初始化 fnm env:{line}");
+        assert!(line.contains("env --use-on-cd"), "应初始化 fnm env:{line}");
     }
 
     #[test]
     fn fnm_hook_present_matches_any_fnm_env_line() {
-        assert!(fnm_hook_present(&fnm_hook_line()));
-        assert!(fnm_hook_present("eval \"$(fnm env --use-on-cd)\"\n"));
+        assert!(fnm_hook_present(&fnm_hook_line(Path::new("/x/fnm/fnm"))));
+        assert!(fnm_hook_present(LEGACY_FNM_HOOK_LINE));
         assert!(fnm_hook_present("  eval \"$(fnm env)\"  \n"));
         assert!(!fnm_hook_present("export PATH=\"$HOME/.fnm:$PATH\"\n"));
         assert!(!fnm_hook_present(""));
@@ -2029,14 +2073,28 @@ mod tests {
     #[test]
     fn inject_fnm_hook_is_idempotent_via_rc_append() {
         // 幂等:重跑同一行不产生重复(复用 shell_rc_append/contains 接缝)
-        let line = fnm_hook_line();
+        let line = fnm_hook_line(Path::new("/x/fnm/fnm"));
         let once = shell_rc_append("# existing\n", &line).unwrap();
         assert!(shell_rc_contains(&once, &line));
-        let count = once.matches("fnm env").count();
+        let count = once.matches("env --use-on-cd").count();
         assert_eq!(count, 1, "首次注入恰好一行");
         // 重跑 → None(不追加),内容不变
         assert!(shell_rc_append(&once, &line).is_none(), "重跑不得重复注入");
-        assert_eq!(once.matches("fnm env").count(), 1);
+        assert_eq!(once.matches("env --use-on-cd").count(), 1);
+    }
+
+    #[test]
+    fn legacy_fnm_hook_line_is_replaced_on_rerun() {
+        // v0.2.0–v0.3.0 实机回归:rc 里已有假定 PATH 的旧钩子行,重跑 install
+        // 必须逐字替换为绝对路径新行,而不是新旧并存(旧行每次登录都报错)
+        let existing = format!("# existing\n{LEGACY_FNM_HOOK_LINE}\n");
+        let stripped = shell_rc_remove(&existing, LEGACY_FNM_HOOK_LINE).unwrap();
+        let line = fnm_hook_line(Path::new("/x/fnm/fnm"));
+        let new = shell_rc_append(&stripped, &line).unwrap();
+        assert!(!new.contains(LEGACY_FNM_HOOK_LINE), "旧行须被移除:{new}");
+        assert_eq!(new.matches("env --use-on-cd").count(), 1, "新行恰好一条");
+        assert!(new.contains("\"/x/fnm/fnm\" env --use-on-cd"), "新行按绝对路径调 fnm:{new}");
+        assert!(fnm_hook_present(&new), "探测须仍识别新行");
     }
 
     #[test]

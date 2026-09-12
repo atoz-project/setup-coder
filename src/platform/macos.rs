@@ -36,8 +36,8 @@ pub fn fnm_install_and_default(fnm_exe: &Path, version: &str) -> Result<(), Box<
 }
 
 /// 注入 fnm 钩子到登录 rc(幂等,与 ensure_path 同一份 rc 清单;返回 FnmHook 记录)
-pub fn inject_fnm_hook() -> io::Result<Vec<PathInjection>> {
-    super::inject_fnm_hook_via_shell_rc(RC_FILES)
+pub fn inject_fnm_hook(fnm_exe: &Path) -> io::Result<Vec<PathInjection>> {
+    super::inject_fnm_hook_via_shell_rc(RC_FILES, fnm_exe)
 }
 
 /// doctor:PATH 持久化体检(与 ensure_path 同一份 rc 文件清单)

@@ -34,7 +34,7 @@ RC_FILES="$HOME/.bashrc $HOME/.zshrc"          # src/platform/linux.rs RC_FILES
 FLOOR_ALL="22.19.0"                  # 全量工具(codex/claude/pi)的 Node 下限
 FNM_DIR="$HOME/.local/share/fnm"     # unix fnm 默认数据目录(src/platform/mod.rs)
 FNM_NODE_BASE="$FNM_DIR/node-versions"          # 快照其下内容以识别新增版本
-FNM_HOOK_LINE='eval "$(fnm env --use-on-cd)"  # setup-coder fnm'   # fnm_hook_line()
+FNM_HOOK_LINE='eval "$("'"$FNM_DIR"'/fnm" env --use-on-cd)"  # setup-coder fnm'   # fnm_hook_line(fnm_exe),绝对路径不依赖 PATH
 PATH_LINE="export PATH=\"$BIN_DIR:\$PATH\"  # setup-coder"           # shell_rc_export_line()
 NVM_DIR_DEFAULT="$HOME/.nvm"
 
@@ -282,6 +282,15 @@ for t in codex claude pi; do
     note "de-hijack run failed: $t rc=$rc out=$out"
   fi
 done
+# 代装 fnm 分支:钩子行本身须在干净 PATH 下可用(v0.3.0 回归:旧钩子假定 fnm
+# 在 PATH,新开终端必报 "Command 'fnm' not found" 且 node 不出现)
+if [ "$EXPECT_FNM_HOOK" = "1" ]; then
+  hook_out=$(env -i PATH=/usr/bin:/bin HOME="$HOME" bash -c "$FNM_HOOK_LINE; node --version" 2>&1)
+  if [ $? -ne 0 ] || [ -z "$hook_out" ]; then
+    dehijack_ok=0
+    note "干净 PATH 下跑 fnm 钩子拿不到 node: $hook_out"
+  fi
+fi
 if [ $dehijack_ok = 1 ]; then
   ok 3 "去劫持:env -i PATH=/usr/bin:/bin 下 codex/claude/pi --version 均 exit 0 且有输出"
 else

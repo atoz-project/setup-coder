@@ -264,8 +264,9 @@ fn install_fnm_branch(
     platform::fnm_install_and_default(&fnm_exe, &spec)?;
     println!("已用 fnm 安装 Node.js v{spec} 并设为默认");
 
-    // 3. 幂等注入 fnm shell 钩子(FnmHook 记录,供精确回滚);重跑不重复注入
-    for injection in platform::inject_fnm_hook()? {
+    // 3. 幂等注入 fnm shell 钩子(FnmHook 记录,供精确回滚);重跑不重复注入,
+    //    且把 v0.2.0–v0.3.0 假定 PATH 的旧钩子行逐字替换为绝对路径新行
+    for injection in platform::inject_fnm_hook(&fnm_exe)? {
         if let crate::prefix::PathInjection::FnmHook { file, line } = &injection {
             println!("已向 {} 注入 fnm 钩子:{line}", file.display());
         }
@@ -831,7 +832,7 @@ mod tests {
         assert!(!root.join(".setup-coder/node").exists());
 
         // 钩子注入:平台登录 rc 获得 FnmHook 行(幂等接缝),记入 state 供精确回滚
-        let hook_line = platform::fnm_hook_line();
+        let hook_line = platform::fnm_hook_line(&fnm_stub);
         let hooks: Vec<_> = state
             .path_injections
             .iter()
@@ -845,7 +846,7 @@ mod tests {
             assert_eq!(line, &hook_line);
             let content = fs::read_to_string(file).unwrap();
             assert_eq!(
-                content.matches("fnm env").count(),
+                content.matches("env --use-on-cd").count(),
                 1,
                 "{} 应恰有一行钩子",
                 file.display()
@@ -867,7 +868,7 @@ mod tests {
             };
             let content = fs::read_to_string(file).unwrap();
             assert_eq!(
-                content.matches("fnm env").count(),
+                content.matches("env --use-on-cd").count(),
                 1,
                 "{} 重跑不得重复行",
                 file.display()
@@ -882,7 +883,9 @@ mod tests {
             let crate::prefix::PathInjection::FnmHook { file, .. } = injection else {
                 unreachable!()
             };
-            assert!(!fs::read_to_string(file).unwrap().contains("fnm env"));
+            assert!(!fs::read_to_string(file)
+                .unwrap()
+                .contains("env --use-on-cd"));
         }
         fs::remove_dir_all(&root).unwrap();
     }
