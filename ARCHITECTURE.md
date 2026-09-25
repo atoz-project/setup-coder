@@ -57,8 +57,8 @@ net.rs 与 one-liner 脚本共用原则:多源依次尝试,首个成功者落盘
 - one-liner 下载 setup-coder 自身(`scripts/install.sh|ps1` 头部常量):OSS → Gitee → GitHub 加速前缀 → GitHub 直连;镜像根留空 = 跳过该源。
 - MinGit(`net.rs`,仅 Windows):npmmirror → cdn.npmmirror → 华为云。
 - fnm(`net.rs`):华为云 → gh-proxy → GitHub 直连(npmmirror 不镜像 fnm,实测 404)。
-- omp 二进制(`net.rs`):gh-proxy → GitHub 直连(npmmirror/华为云均不镜像 oh-my-pi,实测 NOT_FOUND 2026-09-11)。
-- prime-agent tarball(`net.rs`):gh-proxy → GitHub 直连;其 r2.dev 兄弟依赖由 npm 直连,无链(ADR-0006)。
+- omp 二进制(`net.rs`):gh-proxy → GitHub 直连(npmmirror/华为云均不镜像 oh-my-pi,实测 NOT_FOUND 2026-09-11)。不固定版本,走 `releases/latest/download/`(ADR-0007)。
+- prime-agent tarball(`net.rs`):gh-proxy → GitHub 直连;不固定版本,先取固定资产 `latest.json` 解析版本再下同版本 tarball(ADR-0007);其 r2.dev 兄弟依赖由 npm 直连,无链(ADR-0006)。
 
 ## 安装前缀布局(用户机器)
 

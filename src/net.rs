@@ -74,35 +74,48 @@ pub fn fnm_urls(asset: &str) -> Vec<String> {
     ]
 }
 
-/// omp(Oh My Pi)版本与 tag。升级 = 改这两行并重测。
-/// 核实来源:GitHub can1357/oh-my-pi releases/latest,2026-09-11 时为 v18.1.17。
-pub const OMP_VERSION: &str = "18.1.17";
-pub const OMP_TAG: &str = "v18.1.17";
-
 /// omp 预编译二进制下载 URL 容错链(gh-proxy 加速 + GitHub Release 直连兜底)。
+/// 不固定版本(ADR-0007):`releases/latest/download/` 永远取上游最新 release,
+/// 重跑 install 即升级到最新。
 ///
 /// npmmirror 不镜像 oh-my-pi 二进制(`/-/binary/oh-my-pi/` 实测 NOT_FOUND,2026-09-11),
 /// 华为云同理无此项目,故与 fnm 链同形。资产为单文件免运行时二进制
 /// (bun build --compile 产物,文件名如 omp-linux-x64,由 platform::omp_asset_name 定)。
 pub fn omp_urls(asset: &str) -> Vec<String> {
-    let github =
-        format!("https://github.com/can1357/oh-my-pi/releases/download/{OMP_TAG}/{asset}");
+    let github = format!("https://github.com/can1357/oh-my-pi/releases/latest/download/{asset}");
     vec![format!("https://gh-proxy.com/{github}"), github]
 }
 
-/// prime-agent 版本与 tag。升级 = 改这两行并重测。
-/// 核实来源:GitHub PrimeIntellect-ai/prime-agent releases/latest,2026-09-11 时为 v0.9.4。
-pub const PRIME_AGENT_VERSION: &str = "0.9.4";
-pub const PRIME_AGENT_TAG: &str = "v0.9.4";
-
-/// prime-agent npm tarball 下载 URL 容错链(gh-proxy 加速 + GitHub Release 直连兜底)。
+/// prime-agent 最新版 npm tarball 下载 URL 容错链(gh-proxy 加速 + GitHub Release 直连兜底)。
+/// 不固定版本(ADR-0007):tarball 资产名内嵌版本号,无法用 latest/download 直链,
+/// 先经同一容错链取固定资产 `releases/latest/download/latest.json` 解析版本,
+/// 再拼该版本的 tarball URL。
 /// 注意:tarball 内部 3 个兄弟依赖硬编码 r2.dev URL,由 npm 在安装时直连拉取,
 /// 本链只管主 tarball(可达性证据与风险见 ADR-0006)。
-pub fn prime_agent_urls() -> Vec<String> {
+pub fn prime_agent_urls() -> Result<Vec<String>, Box<dyn Error>> {
+    let json_url =
+        "https://github.com/PrimeIntellect-ai/prime-agent/releases/latest/download/latest.json";
+    let urls = [format!("https://gh-proxy.com/{json_url}"), json_url.to_string()];
+    let body = fetch_first(&urls).map_err(|e| format!("获取 prime-agent latest.json 失败:{e}"))?;
+    Ok(prime_agent_urls_for(&parse_prime_agent_tag(&body)?))
+}
+
+/// 按 release tag 拼 prime-agent tarball 容错链(纯函数,便于测试)
+fn prime_agent_urls_for(tag: &str) -> Vec<String> {
+    let version = tag.strip_prefix('v').unwrap_or(tag);
     let github = format!(
-        "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/{PRIME_AGENT_TAG}/prime-agent-{PRIME_AGENT_VERSION}.tgz"
+        "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/{tag}/prime-agent-{version}.tgz"
     );
     vec![format!("https://gh-proxy.com/{github}"), github]
+}
+
+/// 从 prime-agent 的 latest.json 解析 version 字段(形如 "v0.9.6",即 release tag)
+fn parse_prime_agent_tag(json: &str) -> Result<String, Box<dyn Error>> {
+    let v: serde_json::Value = serde_json::from_str(json)?;
+    v.get("version")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "latest.json 缺少 version 字段".into())
 }
 
 /// 建 HTTP agent:尊重代理环境变量;超时由调用方定(大文件下载给足,体检探测要短)
@@ -165,6 +178,32 @@ pub fn download_first(urls: &[String], dest: &Path) -> Result<String, Box<dyn Er
                 let _ = fs::remove_file(dest); // 不留下半截文件
                 failures.push(format!("  {url}:{e}"));
             }
+        }
+    }
+    Err(format!("所有 Mirror 均下载失败:\n{}", failures.join("\n")).into())
+}
+
+/// 容错链取小文本(如 prime-agent latest.json):首个 HTTP 200 源返回 body;
+/// 全部失败则汇总各源错误。与 download_first 不同:不落盘、不嗅探魔数(文本无魔数)。
+fn fetch_first(urls: &[String]) -> Result<String, Box<dyn Error>> {
+    let agent = agent(Duration::from_secs(60));
+    let mut failures = Vec::new();
+    for url in urls {
+        let result = agent
+            .get(url)
+            .call()
+            .map_err(|e| e.to_string())
+            .and_then(|resp| {
+                if resp.status() != ureq::http::StatusCode::OK {
+                    return Err(format!("HTTP {}", resp.status()));
+                }
+                let mut body = resp.into_body();
+                let reader = body.with_config().limit(1024 * 1024).reader();
+                io::read_to_string(reader).map_err(|e| e.to_string())
+            });
+        match result {
+            Ok(body) => return Ok(body),
+            Err(e) => failures.push(format!("  {url}:{e}")),
         }
     }
     Err(format!("所有 Mirror 均下载失败:\n{}", failures.join("\n")).into())
@@ -272,7 +311,7 @@ mod tests {
         assert!(urls.len() >= 2, "必须有容错链");
         for u in &urls {
             assert!(u.starts_with("https://"), "只允许 https:{u}");
-            assert!(u.contains(OMP_TAG), "URL 应含 tag:{u}");
+            assert!(u.contains("releases/latest/download/"), "应走 latest 直链:{u}");
             assert!(u.ends_with("omp-linux-x64"), "URL 应含文件名:{u}");
         }
         // npmmirror/华为云均不镜像 oh-my-pi 二进制(实测 NOT_FOUND),主源为 gh-proxy
@@ -284,22 +323,27 @@ mod tests {
     }
 
     #[test]
-    fn prime_agent_urls_form_a_mirror_chain() {
-        let urls = prime_agent_urls();
+    fn prime_agent_urls_for_forms_a_mirror_chain() {
+        let urls = prime_agent_urls_for("v0.9.6");
         assert!(urls.len() >= 2, "必须有容错链");
         for u in &urls {
             assert!(u.starts_with("https://"), "只允许 https:{u}");
-            assert!(u.contains(PRIME_AGENT_TAG), "URL 应含 tag:{u}");
-            assert!(
-                u.ends_with(&format!("prime-agent-{PRIME_AGENT_VERSION}.tgz")),
-                "URL 应含文件名:{u}"
-            );
+            assert!(u.contains("releases/download/v0.9.6/"), "URL 应含 tag:{u}");
+            assert!(u.ends_with("prime-agent-0.9.6.tgz"), "URL 应含文件名:{u}");
         }
         assert!(urls[0].contains("gh-proxy.com"), "主源应为 gh-proxy");
         assert!(
             urls.last().unwrap().starts_with("https://github.com/"),
             "兜底应为 GitHub 直连"
         );
+    }
+
+    #[test]
+    fn parse_prime_agent_tag_reads_version_field() {
+        let json = r#"{"version": "v0.9.6", "package": "prime-agent"}"#;
+        assert_eq!(parse_prime_agent_tag(json).unwrap(), "v0.9.6");
+        assert!(parse_prime_agent_tag("{}").is_err(), "缺 version 字段应报错");
+        assert!(parse_prime_agent_tag("not json").is_err(), "坏 JSON 应报错");
     }
 
     #[test]
@@ -340,3 +384,4 @@ mod tests {
         assert!(urls[0].contains("npmmirror.com"));
     }
 }
+

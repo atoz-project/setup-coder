@@ -373,7 +373,7 @@ fn install_tool(
     let package = tool.package().expect("install_tool 只服务 npm 系 Tool");
     let candidates: Vec<String> = match &tool.source {
         registry::ToolSource::Npm { .. } => vec![package.to_string()],
-        registry::ToolSource::NpmTarball { .. } => net::prime_agent_urls(),
+        registry::ToolSource::NpmTarball { .. } => net::prime_agent_urls()?,
         registry::ToolSource::Binary => unreachable!("二进制 Tool 走 install_binary_tool"),
     };
     let mut failures = Vec::new();
@@ -417,9 +417,7 @@ fn install_tool(
     installed.push(ToolState {
         name: tool.name.to_string(),
         package: match &tool.source {
-            registry::ToolSource::NpmTarball { .. } => {
-                format!("tarball:{package}@{}", net::PRIME_AGENT_VERSION)
-            }
+            registry::ToolSource::NpmTarball { .. } => format!("tarball:{package}@latest"),
             _ => package.to_string(),
         },
         version,
@@ -435,7 +433,7 @@ fn install_binary_tool(
     tool: &Tool,
     installed: &mut Vec<ToolState>,
 ) -> Result<(), Box<dyn Error>> {
-    println!("安装 {}(预编译二进制 v{})…", tool.name, net::OMP_VERSION);
+    println!("安装 {}(预编译二进制,上游最新版)…", tool.name);
     let asset = platform::omp_asset_name()?;
     let dest = prefix.bin_dir().join(platform::exe_name(tool.bin));
     let hit = net::download_first(&net::omp_urls(asset), &dest)?;
@@ -454,7 +452,7 @@ fn install_binary_tool(
 
     installed.push(ToolState {
         name: tool.name.to_string(),
-        package: format!("binary:can1357/oh-my-pi@{}", net::OMP_VERSION),
+        package: "binary:can1357/oh-my-pi@latest".to_string(),
         version,
     });
     Ok(())
