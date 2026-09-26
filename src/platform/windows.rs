@@ -391,6 +391,8 @@ fn run_fnm_windows(fnm_exe: &Path, args: &[&str]) -> Result<(), Box<dyn Error>> 
 
 /// 注入 fnm 钩子到 PowerShell profile(幂等)。返回实际改动的 FnmHook 记录。
 /// v0.2.0–v0.3.0 的旧钩子行(假定 fnm 在 PATH)随重跑逐字替换为绝对路径新行。
+/// 工单 #27:注入前按行尾标记清除**所有**历史形态钩子行(含 v0.4.0 无守卫绝对路径行),
+/// 再注入带交互守卫的新行——存量机器重跑 install 即完成迁移。
 pub fn inject_fnm_hook(fnm_exe: &Path) -> io::Result<Vec<PathInjection>> {
     let line = super::fnm_hook_line_powershell(fnm_exe);
     let mut injections = Vec::new();
@@ -402,9 +404,7 @@ pub fn inject_fnm_hook(fnm_exe: &Path) -> io::Result<Vec<PathInjection>> {
         };
         let mut content = existing;
         let mut dirty = false;
-        if let Some(stripped) =
-            super::shell_rc_remove(&content, super::LEGACY_FNM_HOOK_LINE_POWERSHELL)
-        {
+        if let Some(stripped) = super::shell_rc_strip_fnm_hook_lines(&content) {
             content = stripped;
             dirty = true;
         }
