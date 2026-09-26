@@ -1,4 +1,4 @@
-# install.ps1 —— setup-coder 的 One-liner 自举脚本(Windows)
+﻿# install.ps1 —— setup-coder 的 One-liner 自举脚本(Windows)
 #
 # 用法(One-liner,见 CONTEXT.md):
 #   irm <本脚本地址> | iex
