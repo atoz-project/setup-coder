@@ -1026,10 +1026,15 @@ pub fn make_executable(path: &Path) -> io::Result<()> {
 /// fnm 的 PowerShell profile 钩子行(Windows;写入用户 profile,幂等判断以这行为准)。
 /// 与 unix 同理按绝对路径调 fnm(fnm.exe 在 %APPDATA%\fnm,不在 PATH);
 /// `&` 是 PowerShell 的调用操作符,带引号路径必须用它。
-#[cfg(windows)]
+///
+/// 工单 #27:守卫非交互会话。WinRM(ServerRemoteHost)、`powershell -File` 自动化、
+/// 计划任务等非交互场景加载 profile 时不再注入 fnm 钩子——否则 fnm_multishells shim
+/// 目录进入 PATH,其中的 Node 分发 DLL 会干扰对 PATH 敏感的原生工具(IDA idalib
+/// 初始化失败为实测定案)。交互式终端行为不变。
+#[cfg(any(windows, test))]
 pub fn fnm_hook_line_powershell(fnm_exe: &Path) -> String {
     format!(
-        "& \"{}\" env --use-on-cd | Out-String | Invoke-Expression  # setup-coder fnm",
+        "if ([Environment]::UserInteractive -and $Host.Name -ne 'ServerRemoteHost') {{ & \"{}\" env --use-on-cd | Out-String | Invoke-Expression }}  # setup-coder fnm",
         fnm_exe.display()
     )
 }
@@ -1038,6 +1043,35 @@ pub fn fnm_hook_line_powershell(fnm_exe: &Path) -> String {
 #[cfg(windows)]
 pub const LEGACY_FNM_HOOK_LINE_POWERSHELL: &str =
     "fnm env --use-on-cd | Out-String | Invoke-Expression  # setup-coder fnm";
+
+/// 工单 #27 迁移辅助:按行尾标记 `# setup-coder fnm` 移除**所有历史形态**的钩子行
+/// (v0.2–v0.3 裸 fnm 行、v0.4.0 无守卫绝对路径行),供注入守卫版前清理存量。
+/// 返回 None 表示没有改动(幂等)。
+#[cfg(any(windows, test))]
+pub fn shell_rc_strip_fnm_hook_lines(existing: &str) -> Option<String> {
+    const MARKER: &str = "# setup-coder fnm";
+    let mut removed = false;
+    let kept: Vec<&str> = existing
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            let is_hook =
+                t.contains(MARKER) && t.contains("env") && t.contains("Invoke-Expression");
+            if is_hook {
+                removed = true;
+            }
+            !is_hook
+        })
+        .collect();
+    if !removed {
+        return None;
+    }
+    let mut new = kept.join("\n");
+    if !new.is_empty() {
+        new.push('\n');
+    }
+    Some(new)
+}
 
 /// PowerShell profile 内容中是否已有 fnm 钩子(任一 fnm env 初始化行;trim 比较)。
 /// 绝对路径形态下不能再匹配 "fnm env" 子串(`fnm.exe" env` 中间隔引号)。
@@ -2276,5 +2310,30 @@ mod tests {
         fs::write(&exe, "#!/bin/sh\necho 1.0.0\n").unwrap();
         assert_eq!(fnm_exe_path(&exe), exe);
         fs::remove_dir_all(&root).unwrap();
+    }
+    /// 工单 #27:守卫版钩子行必须带交互守卫,且保留行尾标记(供迁移清理/卸载识别)。
+    #[test]
+    fn fnm_hook_line_powershell_is_guarded() {
+        let line = fnm_hook_line_powershell(Path::new("C:\\Users\\u\\AppData\\Roaming\\fnm\\fnm.exe"));
+        assert!(line.contains("[Environment]::UserInteractive"), "{line}");
+        assert!(line.contains("ServerRemoteHost"), "{line}");
+        assert!(line.contains("Invoke-Expression"), "{line}");
+        assert!(line.ends_with("# setup-coder fnm"), "{line}");
+    }
+
+    /// 工单 #27:迁移清理必须覆盖三种历史形态——裸 fnm 行(v0.2-0.3)、
+    /// 无守卫绝对路径行(v0.4.0)、守卫版新行;其余内容原样保留。
+    #[test]
+    fn strip_fnm_hook_lines_covers_all_generations() {
+        let legacy = "fnm env --use-on-cd | Out-String | Invoke-Expression  # setup-coder fnm";
+        let v040 = "& \"C:\\fnm\\fnm.exe\" env --use-on-cd | Out-String | Invoke-Expression  # setup-coder fnm";
+        let guarded = fnm_hook_line_powershell(Path::new("C:\\fnm\\fnm.exe"));
+        let existing = format!("# 用户自己的内容\n{legacy}\nWrite-Host hi\n{v040}\n{guarded}\n");
+        let stripped = shell_rc_strip_fnm_hook_lines(&existing).expect("应有改动");
+        assert!(stripped.contains("# 用户自己的内容"), "{stripped}");
+        assert!(stripped.contains("Write-Host hi"), "{stripped}");
+        assert!(!stripped.contains("setup-coder fnm"), "{stripped}");
+        // 幂等:再剥一次返回 None
+        assert!(shell_rc_strip_fnm_hook_lines(&stripped).is_none());
     }
 }
